@@ -27,7 +27,10 @@ const aliasMap = new Map(Object.entries(headerAliases).flatMap(([key, aliases]) 
   aliases.map((alias) => [normalizeHeader(alias), key])
 )));
 
-const textValue = (value) => String(value ?? '').trim();
+const RATE_FIELD_KEYS = ['dailyRateYear69', 'travelRate', 'positionAllowance', 'specialPositionAmount', 'phoneAllowance', 'welfareSupport'];
+const PAYROLL_SHEET_HEADERS = ['วันทำงานปกติ', 'รวมยอดสุทธิ', 'ค่าแรงปกติ'].map(normalizeHeader);
+
+const textValue = (value) =>String(value ?? '').trim();
 
 const numberValue = (value) => {
   if (value === null || value === undefined || value === '') return undefined;
@@ -78,6 +81,12 @@ const parseWorksheet = (worksheet, sheetName) => {
   // Instruction sheets or unrelated sheets are ignored when one workbook
   // contains both DC and SUPPLY tabs.
   if (!columnMap.has('employeeId')) return null;
+  // The full payroll workbook also has ไฟล์ทำค่าแรง / scan / social-security
+  // sheets keyed by employee ID. Only rate sheets may update rates, otherwise
+  // their ค่าเดินทาง (amount) columns overwrite the real อัตราค่าเดินทาง.
+  if (!RATE_FIELD_KEYS.some((key) => columnMap.has(key))) return null;
+  const headers = new Set(matrix[headerRowIndex].map(normalizeHeader));
+  if (PAYROLL_SHEET_HEADERS.some((header) => headers.has(header))) return null;
 
   const getCell = (row, key) => row[columnMap.get(key)] ?? '';
   const records = [];
