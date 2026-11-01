@@ -58,6 +58,12 @@ service cloud.firestore {
       allow write: if hasRole('PayrollAdmin') || hasRole('WageEntry');
     }
 
+    // Company holidays copied from the master database (CMG-HR-Database/root/day_offs): approved users read, MasterAdmin syncs.
+    match /CMG-Payroll/root/holidays/{date} {
+      allow read: if approved();
+      allow write: if isMaster();
+    }
+
     // Shared data (not tied to a project): rates, payroll and settings.
     match /CMG-Payroll/root/{shared}/{doc=**} {
       allow read: if approved() && shared in ['rates', 'payroll', 'settings', 'payrollPeriods', 'deletedPayrollPeriods'];

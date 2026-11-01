@@ -544,6 +544,12 @@ h1, h2, .modal-header h2 { color: var(--text-strong); }
 .pagination-button:not(:disabled):hover { border-color: rgba(214, 51, 127, .38); color: var(--accent); background: rgba(255, 247, 251, .96); }
 .pagination-button:disabled { cursor: not-allowed; opacity: .38; }
 .pagination-current { min-width: 76px; color: var(--text-muted); font-size: 10px; text-align: center; }
+.pagination-select { height: 24px; padding: 0 4px; border: 1px solid rgba(120, 80, 140, .18); border-radius: 6px; background: rgba(255, 255, 255, .85); color: var(--text); font-size: 11px; }
+.bulk-action-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 16px; border-bottom: 1px solid rgba(80, 50, 100, .06); background: rgba(255, 240, 246, .7); font-size: 12px; }
+.bulk-action-bar strong { margin-right: auto; color: var(--text); }
+.data-table .select-header, .data-table .select-cell { width: 44px; text-align: center; padding-left: 0; padding-right: 0; }
+.data-table .select-cell input, .data-table .select-header input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+.data-table tbody tr.row-selected td { background: rgba(214, 51, 127, .07); }
 @media (max-width: 720px) {
   .pagination-bar { align-items: flex-start; flex-direction: column; }
   .pagination-controls { align-self: flex-end; }

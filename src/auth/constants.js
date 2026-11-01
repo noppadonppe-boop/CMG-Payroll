@@ -47,6 +47,7 @@ export const MODULE_ROLES = {
   rates: [], // MasterAdmin only
   payroll: [], // MasterAdmin only
   adminWage: ['WageEntry'],
+  holidays: [], // MasterAdmin only (Sync วันหยุด writes the shared copy)
   shifts: [], // MasterAdmin only (shift profiles are stored under the project, which only MasterAdmin may write)
   users: [],
 };

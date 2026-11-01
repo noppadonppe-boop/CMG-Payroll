@@ -1,4 +1,4 @@
-import { collection, doc, onSnapshot, writeBatch } from 'firebase/firestore';
+import { collection, deleteField, doc, FieldPath, onSnapshot, updateDoc, writeBatch } from 'firebase/firestore';
 import { auth, db, ensureFirebaseReady, isFirebaseConfigured } from './firebase';
 import { FIREBASE_ROOT_COLLECTION, FIREBASE_ROOT_DOCUMENT, PAYROLL_PERIODS_COLLECTION } from './repository';
 
@@ -51,8 +51,9 @@ const biotimeCollection = (periodId) => collection(db, FIREBASE_ROOT_COLLECTION,
 const docId = (employeeId) => String(employeeId).trim().replace(/[^a-zA-Z0-9_-]/g, '-');
 
 // One document per employee under the period: payrollPeriods/{periodId}/biotime/{employeeId}.
-// Picked employees without any scan are still saved (empty `days`).
-export async function saveBiotimeAttendance({ period, employees, punches }) {
+// Picked employees without any scan are still saved (empty `days`). Scans before the period start
+// (the lead-in days fetched for the first Sunday's 6-day check) go to `leadInDays`, not `days`.
+export async function saveBiotimeAttendance({ period, employees, punches, leadInStartDate = null }) {
   if (!isFirebaseConfigured) throw new Error('ยังไม่ได้ตั้งค่า Firebase จึงบันทึกข้อมูลไม่ได้');
   await ensureFirebaseReady();
   const grouped = groupDailyPunches(punches, employees.map((employee) => employee.employeeId));
@@ -60,6 +61,7 @@ export async function saveBiotimeAttendance({ period, employees, punches }) {
   for (let index = 0; index < employees.length; index += 400) {
     const batch = writeBatch(db);
     employees.slice(index, index + 400).forEach((employee) => {
+      const all = grouped.get(employee.employeeId) || [];
       batch.set(doc(biotimeCollection(period.id), docId(employee.employeeId)), {
         employeeId: employee.employeeId,
         name: employee.name || '',
@@ -69,13 +71,24 @@ export async function saveBiotimeAttendance({ period, employees, punches }) {
         position: employee.position || '',
         startDate: period.startDate,
         endDate: period.endDate,
-        days: grouped.get(employee.employeeId) || [],
+        days: all.filter((day) => day.date >= period.startDate),
+        leadInStartDate,
+        leadInDays: leadInStartDate ? all.filter((day) => day.date < period.startDate) : [],
         fetchedAt,
-      });
+      }, { merge: true }); // merge keeps the manual time `overrides` across re-fetches
     });
     await batch.commit();
   }
-  return { employees: employees.length, days: [...grouped.values()].reduce((sum, list) => sum + list.length, 0) };
+  return { employees: employees.length, days: [...grouped.values()].reduce((sum, list) => sum + list.filter((day) => day.date >= period.startDate).length, 0) };
+}
+
+// Manual time for one day: overrides.{date}.{timeIn|timeOut} = { time: 'HH:MM', reason }.
+// `value` null removes it so the Biotime scan is used again.
+export async function saveBiotimeOverride({ periodId, employeeId, date, field, value }) {
+  if (!isFirebaseConfigured) throw new Error('ยังไม่ได้ตั้งค่า Firebase จึงบันทึกข้อมูลไม่ได้');
+  await ensureFirebaseReady();
+  const data = value ? { ...value, updatedAt: new Date().toISOString(), updatedBy: auth?.currentUser?.email || '' } : deleteField();
+  await updateDoc(doc(biotimeCollection(periodId), docId(employeeId)), new FieldPath('overrides', date, field), data);
 }
 
 export function subscribeToBiotimeAttendance({ periodId, onData, onError }) {

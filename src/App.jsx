@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { effectiveNetTotal, effectiveTravelAmount, formatCell, formatCurrency, isCampTravel, isNameRecentlyChanged, menuItems, sourceCatalog, usersMenuItem } from './data/schema';
 import { isFirebaseConfigured, isMasterDatabaseConfigured } from './lib/firebase';
 import { archivePayrollPeriod, deleteDatasetRecord, isRowVisible, loadPayrollRevisionRows, PAYROLL_SAVEDRAFT_STATUS, saveDatasetRecord, savePayrollPeriod, savePayrollRevision, saveColumnSettings, saveSpecialPositionOptions, subscribeToColumnSettings, subscribeToDataset, subscribeToPayrollPeriods, subscribeToPayrollRevisions, subscribeToSpecialPositionOptions, syncMasterEmployees } from './lib/repository';
@@ -11,8 +11,12 @@ import { subscribeToUsers } from './auth/userService';
 import { ProfileModal, ProjectsPage, SidebarProfileCard, TopbarProfileMenu, UserManagementPage } from './auth/ui';
 import BiotimePanel from './BiotimePanel';
 import ShiftsPage from './ShiftsPage';
+import HolidaysPage from './HolidaysPage';
+import { useHolidays } from './lib/holidays';
+import PayrollDashboard from './PayrollDashboard';
 import { subscribeToBiotimeAttendance } from './lib/biotime';
-import { buildEmployeeReport } from './lib/biotimeReport';
+import { attachLeadIn, buildEmployeeReport, previousPeriodOf } from './lib/biotimeReport';
+import { useShiftSchedule } from './lib/shiftSchedule';
 import './styles.css';
 import './auth/auth.css';
 import './theme-ocean.css';
@@ -29,7 +33,13 @@ const COLUMN_SETTINGS_STORAGE_KEY = 'cmg-payroll-column-settings-v1';
 const PAYROLL_PERIOD_STORAGE_KEY = 'cmg-payroll-current-period-v1';
 const MIN_COLUMN_WIDTH = 28;
 const TABLE_PAGE_SIZE = 50;
+const PAGE_SIZE_OPTIONS = [20, 50, 100, 200];
 const PAYROLL_RATE_SHEET_BY_PAYROLL_SHEET = { DC: 'DC', SUPPLY: 'SUPPLY' };
+// Rate rows a payroll sheet draws from; a sheet without its own rate sheet (ซอ) uses all of them.
+const ratesForPayrollSheet = (ratesBySheet = {}, sheet) => {
+  const sourceSheet = PAYROLL_RATE_SHEET_BY_PAYROLL_SHEET[sheet];
+  return sourceSheet ? ratesBySheet[sourceSheet] || [] : Object.values(ratesBySheet).flat();
+};
 const EMPTY_LIST = [];
 const RATE_IMPORT_FIELDS = [
   'dailyRateYear69',
@@ -136,9 +146,8 @@ const buildPayrollRowsFromRates = (existingPayroll = {}, ratesBySheet = {}) => {
   let changed = false;
 
   Object.keys(sourceCatalog.payroll.tabs).forEach((sheet) => {
-    const sourceSheet = PAYROLL_RATE_SHEET_BY_PAYROLL_SHEET[sheet];
     const existingRows = existingPayroll[sheet] || [];
-    const sourceRows = (ratesBySheet[sourceSheet] || []).filter(isRowVisible);
+    const sourceRows = ratesForPayrollSheet(ratesBySheet, sheet).filter(isRowVisible);
     if (!existingRows.length || !sourceRows.length) return;
 
     const rateByEmployeeId = new Map(sourceRows.map((row) => [normalizeEmployeeKey(row.employeeId), row]));
@@ -231,6 +240,7 @@ const iconForMenu = {
   payroll: '฿',
   rates: '▤',
   adminWage: '✎',
+  holidays: '🎌',
 };
 
 const menuPaths = {
@@ -241,6 +251,7 @@ const menuPaths = {
   rates: '/rates',
   adminWage: '/admin-wage',
   shifts: '/shifts',
+  holidays: '/holidays',
 };
 
 const menuIdFromPath = (pathname) => {
@@ -793,12 +804,27 @@ function Workspace() {
   const wageEntryRates = useMemo(() => Object.values(datasets.rates).flat().filter(isRowVisible), [datasets.rates]);
   const wageRateByEmployee = useMemo(() => new Map(wageEntryRates.map((rate) => [normalizeEmployeeKey(rate.employeeId), rate])), [wageEntryRates]);
   // Summary rows with the special-position pay from Admin ลงค่าแรง (days x rate amount) added in.
-  const [biotimeRecords, setBiotimeRecords] = useState([]);
+  const [savedBiotimeRecords, setBiotimeRecords] = useState([]);
   useEffect(() => {
     setBiotimeRecords([]);
     return subscribeToBiotimeAttendance({ periodId: payrollPeriod?.id, onData: setBiotimeRecords, onError: () => setBiotimeRecords([]) });
   }, [payrollPeriod?.id]);
-  const biotimeTotals = useMemo(() => new Map(biotimeRecords.map((record) => [normalizeEmployeeKey(record.employeeId), buildEmployeeReport(record).totals])), [biotimeRecords]);
+  // The previous continuous period's scans fill the first Sunday's 6-day check for records saved
+  // before lead-in days were fetched with the period.
+  const previousPeriodId = previousPeriodOf(payrollPeriods, currentPeriodCard?.startDate ?? payrollPeriod?.startDate)?.id;
+  const [previousBiotime, setPreviousBiotime] = useState(EMPTY_LIST);
+  useEffect(() => {
+    setPreviousBiotime(EMPTY_LIST);
+    if (!previousPeriodId) return undefined;
+    return subscribeToBiotimeAttendance({ periodId: previousPeriodId, onData: setPreviousBiotime, onError: () => setPreviousBiotime(EMPTY_LIST) });
+  }, [previousPeriodId]);
+  const previousBiotimeByEmployee = useMemo(() => new Map(previousBiotime.map((record) => [normalizeEmployeeKey(record.employeeId), record])), [previousBiotime]);
+  const biotimeRecords = useMemo(() => savedBiotimeRecords.map((record) => attachLeadIn(record, previousBiotimeByEmployee.get(normalizeEmployeeKey(record.employeeId)))), [savedBiotimeRecords, previousBiotimeByEmployee]);
+  // Employees with a ตั้งกะการทำงาน shift use that shift's times instead of the Biotime defaults.
+  const shiftFor = useShiftSchedule(projects);
+  // Company holidays (synced from the master database) fill the report's วันหยุดบริษัท column.
+  const { holidays, loaded: holidaysLoaded, holidayFor } = useHolidays();
+  const biotimeTotals = useMemo(() => new Map(biotimeRecords.map((record) => [normalizeEmployeeKey(record.employeeId), buildEmployeeReport(record, shiftFor, holidayFor).totals])), [biotimeRecords, shiftFor, holidayFor]);
   const payrollWithSpecialPay = useMemo(() => {
     const daysByEmployee = new Map();
     wageEntries.filter((entry) => entryHasSpecial(entry) && isEntryApproved(entry)).forEach((entry) => {
@@ -809,11 +835,11 @@ function Workspace() {
     return Object.fromEntries(Object.entries(datasets.payroll).map(([sheet, rows]) => [sheet, rows.map((payrollRow) => {
       const key = normalizeEmployeeKey(payrollRow.employeeId);
       // อัตราค่าแรง / ค่าเดินทาง always come from the rate table, never from the stored payroll row.
-      const sourceRate = (datasets.rates[PAYROLL_RATE_SHEET_BY_PAYROLL_SHEET[sheet]] || []).find((rate) => normalizeEmployeeKey(rate.employeeId) === key);
+      const sourceRate = ratesForPayrollSheet(datasets.rates, sheet).find((rate) => normalizeEmployeeKey(rate.employeeId) === key);
       const rawRow = sourceRate ? { ...payrollRow, dailyRate: Number(sourceRate.dailyRateYear69) || 0, overtimeRate15: (Number(sourceRate.dailyRateYear69) || 0) / 8 * 1.5, travelRate: sourceRate.travelRate ?? '' } : payrollRow;
       // Biotime attendance (saved for this period) drives working days, OT 1.5 and Sunday OT hours.
       const attendance = biotimeTotals.get(key);
-      const row = attendance ? { ...rawRow, normalDays: attendance.normal, overtime15: attendance.ot, overtime2Sunday: attendance.sunday, fromBiotime: true } : rawRow;
+      const row = attendance ? { ...rawRow, normalDays: attendance.normal, overtime15: attendance.ot, overtime2Sunday: attendance.sunday, holidayHours: attendance.holiday, fromBiotime: true } : rawRow;
       const days = daysByEmployee.get(key) || 0;
       // Net total = วันทำงานปกติ × อัตราค่าแรง (+ ค่าเดินทางที่เป็นตัวเลข × วันทำงาน) — always recomputed from the rates.
       if (!days && !row.specialFromEntries) return recalcPayrollRow(row);
@@ -833,7 +859,6 @@ function Workspace() {
       ...allRows.flatMap((row) => [row.position, row.specialPosition]),
     ].map((value) => String(value || '').trim()).filter(Boolean))];
   }, [datasets.rates, datasets.payroll, specialPositionOptions]);
-  const totalPayroll = useMemo(() => payrollRows.reduce((sum, row) => sum + effectiveNetTotal(row), 0), [payrollRows]);
   const activeMenuItem = [...menuItems, usersMenuItem].find((item) => item.id === activeMenu) || menuItems.find((item) => item.id === 'overview');
   const menuAllowed = canAccess(activeMenu);
   const pendingUserCount = useMemo(() => users.filter((user) => user.status === 'pending').length, [users]);
@@ -956,9 +981,7 @@ function Workspace() {
 
   // Rate rows a payroll tab can draw from; a tab without its own rate sheet may use any of them.
   const payrollSourceRates = (sheet) => {
-    const sourceSheet = PAYROLL_RATE_SHEET_BY_PAYROLL_SHEET[sheet];
-    const rows = sourceSheet ? datasets.rates[sourceSheet] || [] : Object.values(datasets.rates).flat();
-    return rows.filter(isRowVisible);
+    return ratesForPayrollSheet(datasets.rates, sheet).filter(isRowVisible);
   };
 
   // Persists the payroll rows of the open period as a draft on the period document, so nothing is lost before a Revision is saved.
@@ -1121,21 +1144,23 @@ function Workspace() {
   };
 
   const deleteRecord = async () => {
-    const { category, sheet, row } = deleteTarget;
+    const { category, sheet, row, rows } = deleteTarget;
+    const targets = rows || [row];
+    const ids = new Set(targets.map((item) => item.id));
     try {
       // Payroll rows belong to the open period and are stored with its revisions, not as documents.
-      if (category !== 'payroll') await deleteDatasetRecord({ category, record: row });
+      if (category !== 'payroll') await Promise.all(targets.map((record) => deleteDatasetRecord({ category, record })));
       setDatasets((current) => ({
         ...current,
         [category]: {
           ...current[category],
-          [sheet]: (current[category][sheet] || []).filter((item) => item.id !== row.id),
+          [sheet]: (current[category][sheet] || []).filter((item) => !ids.has(item.id)),
         },
       }));
-      if (category === 'payroll') persistPayrollDraft({ ...datasets.payroll, [sheet]: (datasets.payroll[sheet] || []).filter((item) => item.id !== row.id) });
+      if (category === 'payroll') persistPayrollDraft({ ...datasets.payroll, [sheet]: (datasets.payroll[sheet] || []).filter((item) => !ids.has(item.id)) });
       setDeleteTarget(null);
       setFirebaseError('');
-      setToast('ลบรายการแล้ว');
+      setToast(targets.length > 1 ? `ลบ ${targets.length} รายการแล้ว` : 'ลบรายการแล้ว');
     } catch (error) {
       console.error('ไม่สามารถลบข้อมูลจาก Firebase', error);
       setToast(error?.code === 'permission-denied'
@@ -1438,10 +1463,12 @@ function Workspace() {
           <ProjectsPage projects={allProjects} rateRows={rateRows} onNotify={setToast} />
         ) : activeMenu === 'shifts' ? (
           <ShiftsPage projects={projects} rateRows={rateRows} canEdit={isMasterAdmin} onNotify={setToast} />
+        ) : activeMenu === 'holidays' ? (
+          <HolidaysPage holidays={holidays} loaded={holidaysLoaded} canSync={isMasterAdmin} onNotify={setToast} />
         ) : activeMenu === 'users' ? (
           <UserManagementPage users={users} projects={allProjects} loaded={usersLoaded} onNotify={setToast} />
         ) : activeMenu === 'overview' ? (
-          <Overview totalPayroll={totalPayroll} payrollRows={payrollRows} rateRows={rateRows} onNavigate={selectMenu} />
+          <PayrollDashboard payrollRows={payrollRows} rateRows={rateRows} periods={payrollPeriods} period={payrollPeriod} wageEntries={wageEntries} biotimeRecords={biotimeRecords} shiftFor={shiftFor} holidayFor={holidayFor} onNavigate={selectMenu} />
         ) : activeMenu === 'adminWage' && !wageEmployeeId ? (
           <AdminWageRoster
             periods={wageOpenPeriods}
@@ -1494,6 +1521,9 @@ function Workspace() {
         ) : (
           <DatasetView
             biotimeEmployees={biotimeEmployees}
+            previousBiotimeByEmployee={previousBiotimeByEmployee}
+            shiftFor={shiftFor}
+            holidayFor={holidayFor}
             onBack={activeMenu === 'payroll' ? () => { setPayrollView('list'); setSearch(''); } : undefined}
             category={activeMenu}
             sheet={activeTabs[activeMenu]}
@@ -1505,6 +1535,7 @@ function Workspace() {
             onEdit={(row) => openEditor(activeMenu, activeTabs[activeMenu], row)}
             onInlineUpdate={activeMenu === 'rates' ? (row, changes) => saveInlineRate({ sheet: activeTabs[activeMenu], row, changes }) : undefined}
             onDelete={(row) => setDeleteTarget({ category: activeMenu, sheet: activeTabs[activeMenu], row })}
+            onDeleteMany={activeMenu === 'payroll' ? (rows) => setDeleteTarget({ category: activeMenu, sheet: activeTabs[activeMenu], rows }) : undefined}
             onSync={activeMenu === 'rates' ? syncRates : undefined}
             onImport={activeMenu === 'rates' ? importRates : undefined}
             period={activeMenu === 'payroll' ? payrollPeriod : undefined}
@@ -1535,6 +1566,7 @@ function Workspace() {
       {deleteTarget && (
         <ConfirmDelete
           row={deleteTarget.row}
+          rows={deleteTarget.rows}
           category={deleteTarget.category}
           onClose={() => setDeleteTarget(null)}
           onConfirm={deleteRecord}
@@ -1586,60 +1618,6 @@ function App() {
   return <AuthProvider><AppRoutes /></AuthProvider>;
 }
 
-function Overview({ totalPayroll, payrollRows, rateRows, onNavigate }) {
-  const bySheet = Object.entries(sourceCatalog.payroll.tabs).map(([sheet, config]) => ({
-    sheet,
-    label: config.label,
-    count: payrollRows.filter((row) => row.sheet === sheet).length,
-    total: payrollRows.filter((row) => row.sheet === sheet).reduce((sum, row) => sum + effectiveNetTotal(row), 0),
-  }));
-
-  return (
-    <div className="page-content">
-      <section className="hero-section">
-        <div>
-          <div className="eyebrow">ระบบบริหารจัดการค่าแรง</div>
-          <h1>ภาพรวมค่าแรง</h1>
-          <p className="page-description">จัดการข้อมูลอัตราค่าแรงและค่าแรงรายงวดจากโครงสร้าง Excel เดิมในหน้าจอเดียว</p>
-        </div>
-        <div className="hero-period"><span className="calendar-icon">▣</span><div><span className="muted-label">รอบข้อมูล</span><strong>ปี 2569 · งวดตัวอย่าง</strong></div></div>
-      </section>
-
-      <section className="metric-grid">
-        <MetricCard label="ยอดค่าแรงสุทธิ" value={`฿${formatCurrency(totalPayroll)}`} detail="จากข้อมูลค่าแรงรายงวด" accent="orange" />
-        <MetricCard label="รายการค่าแรง" value={formatCurrency(payrollRows.length)} detail="ข้อมูลตัวอย่าง 3 ชุด" accent="blue" />
-        <MetricCard label="พนักงานในทะเบียน" value={formatCurrency(rateRows.length)} detail="จากเมนูอัตราค่าแรง" accent="green" />
-        <MetricCard label="โครงสร้างชีต" value="5 ชีต" detail="แบ่งตามเมนูและแท็บ" accent="purple" />
-      </section>
-
-      <div className="overview-grid">
-        <section className="panel panel-large">
-          <div className="panel-heading"><div><h2>สรุปค่าแรงตามชุดงาน</h2><p>ตัวเลขจะเปลี่ยนตามรายการที่บันทึกในแต่ละแท็บ</p></div><button className="text-button" onClick={() => onNavigate('payroll')}>เปิดข้อมูลค่าแรง <span>→</span></button></div>
-          <div className="summary-list">
-            {bySheet.map((item) => (
-              <div className="summary-row" key={item.sheet}>
-                <div className="summary-name"><span className="summary-icon">{item.sheet === 'DC' ? 'D' : item.sheet === 'SUPPLY' ? 'S' : 'ซ'}</span><div><strong>{item.label}</strong><span>{item.count} รายการ</span></div></div>
-                <div className="summary-total">฿{formatCurrency(item.total)}</div>
-                <div className="summary-bar"><span style={{ width: `${Math.min(100, Math.max(8, item.total / Math.max(totalPayroll, 1) * 100))}%` }} /></div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel quick-panel">
-          <div className="panel-heading"><div><h2>เริ่มต้นใช้งาน</h2><p>จัดการข้อมูลตามโครงสร้างไฟล์ต้นแบบ</p></div></div>
-          <button className="quick-action" onClick={() => onNavigate('rates')}><span className="quick-action-icon">▤</span><span><strong>ตรวจสอบอัตราค่าแรง</strong><small>ทะเบียนพนักงานและอัตรา</small></span><span className="arrow">→</span></button>
-          <button className="quick-action" onClick={() => onNavigate('payroll')}><span className="quick-action-icon orange-bg">฿</span><span><strong>บันทึกค่าแรงรายงวด</strong><small>จำนวนวัน, OT และเงินหัก</small></span><span className="arrow">→</span></button>
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function MetricCard({ label, value, detail, accent }) {
-  return <div className={`metric-card ${accent}`}><div className="metric-icon">{accent === 'orange' ? '฿' : accent === 'blue' ? '▣' : accent === 'green' ? '♙' : '⊞'}</div><div><div className="metric-label">{label}</div><div className="metric-value">{value}</div><div className="metric-detail">{detail}</div></div></div>;
-}
-
 const formatPeriodDate = (value) => {
   if (!value) return '-';
   const date = new Date(value);
@@ -1679,12 +1657,13 @@ function PayrollPeriodList({ periods, currentPeriodId, openingId, onOpen, onDele
   );
 }
 
-function DatasetView({ biotimeEmployees = EMPTY_LIST, onBack, category, sheet, onSheetChange, rows, search, setSearch, onAdd, onEdit, onInlineUpdate, onDelete, onSync, onImport, period, revisionCount = 0, onSavePeriod, onOpenNewPeriod, specialPositionOptions, specialPositionColorOptions = [], positionColorOptions = [], onSpecialPositionOptionsChange, syncing, canSyncMaster }) {
+function DatasetView({ biotimeEmployees = EMPTY_LIST, previousBiotimeByEmployee, shiftFor, holidayFor, onBack, category, sheet, onSheetChange, rows, search, setSearch, onAdd, onEdit, onInlineUpdate, onDelete, onDeleteMany, onSync, onImport, period, revisionCount = 0, onSavePeriod, onOpenNewPeriod, specialPositionOptions, specialPositionColorOptions = [], positionColorOptions = [], onSpecialPositionOptionsChange, syncing, canSyncMaster }) {
   const config = sourceCatalog[category];
   const [payrollSection, setPayrollSection] = useState('table');
   const isBiotimeTab = category === 'payroll' && payrollSection === 'biotime';
   const tab = config.tabs[sheet] || Object.values(config.tabs)[0];
-  const settingsKey = `${category}:${sheet}`;
+  // All payroll sheets (DC, SUPPLY, ซอ) share DC's column settings.
+  const settingsKey = category === 'payroll' ? 'payroll:DC' : `${category}:${sheet}`;
   const importInputRef = useRef(null);
   const [importing, setImporting] = useState(false);
   const [importPreview, setImportPreview] = useState(null);
@@ -1705,13 +1684,20 @@ function DatasetView({ biotimeEmployees = EMPTY_LIST, onBack, category, sheet, o
     if (!normalized) return rows;
     return rows.filter((row) => Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(normalized)));
   }, [rows, search]);
-  const pageCount = Math.max(1, Math.ceil(filteredRows.length / TABLE_PAGE_SIZE));
+  const [pageSize, setPageSize] = useState(TABLE_PAGE_SIZE);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const selectable = category === 'payroll' && Boolean(onDeleteMany);
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const pageRows = useMemo(() => {
-    const start = (currentPage - 1) * TABLE_PAGE_SIZE;
-    return filteredRows.slice(start, start + TABLE_PAGE_SIZE);
-  }, [currentPage, filteredRows]);
-  const pageStart = filteredRows.length ? (currentPage - 1) * TABLE_PAGE_SIZE + 1 : 0;
-  const pageEnd = Math.min(currentPage * TABLE_PAGE_SIZE, filteredRows.length);
+    const start = (currentPage - 1) * pageSize;
+    return filteredRows.slice(start, start + pageSize);
+  }, [currentPage, filteredRows, pageSize]);
+  const selectedRows = useMemo(() => filteredRows.filter((row) => selectedIds.has(row.id)), [filteredRows, selectedIds]);
+  const toggleRowSelection = useCallback((ids, checked) => setSelectedIds((current) => {
+    const next = new Set(current);
+    ids.forEach((id) => (checked ? next.add(id) : next.delete(id)));
+    return next;
+  }), []);
   const sourceBanner = category === 'rates'
     ? <div className="source-banner"><span className="source-file-icon">▤</span><div><span className="source-label">{sourceLabel}</span><strong>{sourceName}</strong></div><span className="source-meta">{sourceMeta}</span></div>
     : <div className="source-banner"><span className="source-meta" style={{ marginLeft: 'auto' }}>{sourceMeta}</span></div>;
@@ -1763,7 +1749,21 @@ function DatasetView({ biotimeEmployees = EMPTY_LIST, onBack, category, sheet, o
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [sheet, search]);
+  }, [sheet, search, pageSize]);
+
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [sheet, period?.id]);
+
+  // Drop selections for rows that no longer exist (e.g. after a delete).
+  useEffect(() => {
+    setSelectedIds((current) => {
+      if (!current.size) return current;
+      const ids = new Set(rows.map((row) => row.id));
+      const next = new Set([...current].filter((id) => ids.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [rows]);
 
   useEffect(() => {
     setCurrentPage((page) => Math.min(page, pageCount));
@@ -1840,12 +1840,20 @@ function DatasetView({ biotimeEmployees = EMPTY_LIST, onBack, category, sheet, o
       </div>}
 
       {isBiotimeTab ? (
-        <BiotimePanel period={period} employees={biotimeEmployees} PaginationControls={PaginationControls} />
+        <BiotimePanel period={period} employees={biotimeEmployees} previousByEmployee={previousBiotimeByEmployee} shiftFor={shiftFor} holidayFor={holidayFor} PaginationControls={PaginationControls} />
       ) : (
       <section className="data-panel">
         <div className="data-panel-toolbar"><div><h2>{tab.label}</h2><p>หัวตารางตรงตามชีตต้นแบบ แถวข้อมูลเริ่มที่แถว {tab.dataStartRow}</p></div><div className="toolbar-controls">{category === 'rates' && <SpecialPositionOptionsManager options={specialPositionOptions} onChange={onSpecialPositionOptionsChange} />}<ColumnSettingsManager columns={tab.columns} settings={columnSettings} onChange={updateColumnSettings} /><div className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ค้นหาพนักงานหรือข้อมูล..." /></div><button className="filter-button">≡ <span>ตัวกรอง</span></button></div></div>
-        <div ref={tableScrollRef} className="table-scroll"><DataTable columns={visibleColumns} columnWidths={columnSettings.widths} onColumnResize={(key, width) => updateColumnSettings((current) => ({ ...current, widths: { ...current.widths, [key]: width } }))} rows={pageRows} sheet={sheet} now={clock} onEdit={onEdit} onInlineUpdate={onInlineUpdate} onDelete={onDelete} specialPositionOptions={specialPositionColorOptions} positionColorOptions={positionColorOptions} /></div>
-        <PaginationControls currentPage={currentPage} pageCount={pageCount} totalCount={filteredRows.length} onPageChange={setCurrentPage} />
+        {selectable && selectedRows.length > 0 && (
+          <div className="bulk-action-bar">
+            <strong>เลือกแล้ว {selectedRows.length} รายการ</strong>
+            {selectedRows.length < filteredRows.length && <button type="button" className="secondary-button" onClick={() => toggleRowSelection(filteredRows.map((row) => row.id), true)}>เลือกทั้งหมด {filteredRows.length} รายการ</button>}
+            <button type="button" className="secondary-button" onClick={() => setSelectedIds(new Set())}>ล้างที่เลือก</button>
+            <button type="button" className="danger-button" onClick={() => onDeleteMany(selectedRows)}>ลบที่เลือก ({selectedRows.length})</button>
+          </div>
+        )}
+        <div ref={tableScrollRef} className="table-scroll"><DataTable columns={visibleColumns} columnWidths={columnSettings.widths} onColumnResize={(key, width) => updateColumnSettings((current) => ({ ...current, widths: { ...current.widths, [key]: width } }))} rows={pageRows} sheet={sheet} now={clock} onEdit={onEdit} onInlineUpdate={onInlineUpdate} onDelete={onDelete} specialPositionOptions={specialPositionColorOptions} positionColorOptions={positionColorOptions} selectedIds={selectable ? selectedIds : undefined} onToggleSelect={selectable ? toggleRowSelection : undefined} /></div>
+        <PaginationControls currentPage={currentPage} pageCount={pageCount} totalCount={filteredRows.length} onPageChange={setCurrentPage} pageSize={pageSize} onPageSizeChange={setPageSize} />
         <div className="data-panel-footer"><span>แหล่งข้อมูล: {sourceName} / ชีต {tab.sourceSheet.trim()}</span><span>อัปเดตล่าสุด: {isFirebaseConfigured ? 'Firebase' : 'ข้อมูลตัวอย่าง'}</span></div>
       </section>
       )}
@@ -1854,16 +1862,31 @@ function DatasetView({ biotimeEmployees = EMPTY_LIST, onBack, category, sheet, o
   );
 }
 
-function PaginationControls({ currentPage, pageCount, totalCount, onPageChange }) {
-  if (pageCount <= 1) return null;
+function PaginationControls({ currentPage, pageCount, totalCount, onPageChange, pageSize = TABLE_PAGE_SIZE, onPageSizeChange }) {
+  if (pageCount <= 1 && !(onPageSizeChange && totalCount)) return null;
   const goToPage = (page) => onPageChange(Math.max(1, Math.min(pageCount, page)));
   return (
     <nav className="pagination-bar" aria-label="การแบ่งหน้าตาราง">
-      <span className="pagination-summary">หน้าละ {TABLE_PAGE_SIZE} รายการ · ทั้งหมด {totalCount} รายการ</span>
+      {onPageSizeChange ? (
+        <span className="pagination-summary">
+          แสดงหน้าละ{' '}
+          <select className="pagination-select" value={pageSize} onChange={(event) => onPageSizeChange(Number(event.target.value))} aria-label="จำนวนรายการต่อหน้า">
+            {PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size}</option>)}
+          </select>
+          {' '}รายการ · ทั้งหมด {totalCount} รายการ
+        </span>
+      ) : <span className="pagination-summary">หน้าละ {pageSize} รายการ · ทั้งหมด {totalCount} รายการ</span>}
       <div className="pagination-controls">
         <button type="button" className="pagination-button" onClick={() => goToPage(1)} disabled={currentPage === 1} aria-label="หน้าแรก">«</button>
         <button type="button" className="pagination-button" onClick={() => goToPage(currentPage - 1)} disabled={currentPage === 1} aria-label="หน้าก่อนหน้า">‹</button>
-        <span className="pagination-current">หน้า {currentPage} / {pageCount}</span>
+        {onPageSizeChange ? (
+          <span className="pagination-current">หน้า{' '}
+            <select className="pagination-select" value={currentPage} onChange={(event) => goToPage(Number(event.target.value))} aria-label="เลือกหน้า">
+              {Array.from({ length: pageCount }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}</option>)}
+            </select>
+            {' '}/ {pageCount}
+          </span>
+        ) : <span className="pagination-current">หน้า {currentPage} / {pageCount}</span>}
         <button type="button" className="pagination-button" onClick={() => goToPage(currentPage + 1)} disabled={currentPage === pageCount} aria-label="หน้าถัดไป">›</button>
         <button type="button" className="pagination-button" onClick={() => goToPage(pageCount)} disabled={currentPage === pageCount} aria-label="หน้าสุดท้าย">»</button>
       </div>
@@ -2077,8 +2100,8 @@ const DEDUCT_COLUMN_KEYS = ['wageDrop', 'deduction', 'socialSecurity'];
 const INCOME_COLUMN_KEYS = ['dailyRate', 'travelRate', 'positionAllowance', 'phoneAllowance', 'overtimeRate15', 'overtime2SundayAmount', 'overtime2HolidayAmount', 'holidayHoursAmount', 'contractWork'];
 const columnSignClass = (key) => (DEDUCT_COLUMN_KEYS.includes(key) ? 'col-deduct' : INCOME_COLUMN_KEYS.includes(key) ? 'col-income' : '');
 
-const DataTableRow = memo(function DataTableRow({ sheet, columns, row, now, onEdit, onInlineUpdate, onDelete, specialPositionOptions, positionColorOptions }) {
-  return <tr onDoubleClick={(event) => { if (event.target.closest('button, input, select, textarea')) return; onEdit(row); }}>{columns.map((column) => {
+const DataTableRow = memo(function DataTableRow({ sheet, columns, row, now, onEdit, onInlineUpdate, onDelete, specialPositionOptions, positionColorOptions, selected, onToggleSelect }) {
+  return <tr className={selected ? 'row-selected' : undefined} onDoubleClick={(event) => { if (event.target.closest('button, input, select, textarea')) return; onEdit(row); }}>{onToggleSelect && <td className="select-cell"><input type="checkbox" checked={Boolean(selected)} onChange={(event) => onToggleSelect([row.id], event.target.checked)} aria-label={`เลือกรายการ ${row.employeeId || ''}`} /></td>}{columns.map((column) => {
     const nameChanged = isNameRecentlyChanged(row, column.key, now);
     const displayValue = column.key === 'travelAmount' ? effectiveTravelAmount(row) : column.key === 'netTotal' ? effectiveNetTotal(row) : column.key === 'dailyRate' ? (Number(row.dailyRate) || 0) * (Number(row.normalDays) || 0) : column.key === 'travelRate' ? (row.normalDays !== undefined && row.travelRate !== '' && row.travelRate != null && Number.isFinite(Number(row.travelRate)) ? (Number(row.travelRate) || 0) * (Number(row.normalDays) || 0) : row.travelRate) : column.key === 'overtimeRate15' ? (Number(row.overtime15) || 0) * (Number(row.overtimeRate15) || 0) : row[column.key];
     return <td key={column.key} title={nameChanged ? 'ชื่อถูกเปลี่ยนจาก Master Database ภายใน 24 ชั่วโมงที่ผ่านมา' : undefined} className={[columnSignClass(column.key), column.key === 'netTotal' ? 'align-right' : '', !column.editable && column.editable !== undefined ? 'calculated-cell' : '', column.key === 'firstName' || column.key === 'lastName' ? 'name-cell' : '', nameChanged ? 'name-changed-cell' : '', column.type === 'special-position' ? 'special-position-cell' : '', column.key === 'position' ? 'position-cell' : ''].filter(Boolean).join(' ')}>{column.type === 'special-position' ? <SpecialPositionCell row={row} column={column} options={specialPositionOptions} onChange={(changes) => onInlineUpdate?.(row, changes)} /> : column.key === 'position' ? <PositionBadge value={row[column.key]} options={positionColorOptions} /> : column.key === 'employeeId' ? <strong className="employee-code">{formatCell(displayValue, column.type)}</strong> : column.key === 'netTotal' || column.key === 'dailyRateYear69' ? <strong>{formatCell(displayValue, column.type)}</strong> : formatCell(displayValue, column.type)}</td>;
@@ -2089,13 +2112,20 @@ const DataTableRow = memo(function DataTableRow({ sheet, columns, row, now, onEd
   && previous.now === next.now
   && sameOptionList(previous.specialPositionOptions, next.specialPositionOptions)
   && sameOptionList(previous.positionColorOptions, next.positionColorOptions)
-  && Boolean(previous.onDelete) === Boolean(next.onDelete));
+  && Boolean(previous.onDelete) === Boolean(next.onDelete)
+  && previous.selected === next.selected
+  && previous.onToggleSelect === next.onToggleSelect);
 
-const DataTable = memo(function DataTable({ sheet, columns, columnWidths = {}, onColumnResize, rows, now = Date.now(), onEdit, onInlineUpdate, onDelete, specialPositionOptions = EMPTY_LIST, positionColorOptions = EMPTY_LIST }) {
+const SELECT_COLUMN_WIDTH = 44;
+
+const DataTable = memo(function DataTable({ sheet, columns, columnWidths = {}, onColumnResize, rows, now = Date.now(), onEdit, onInlineUpdate, onDelete, specialPositionOptions = EMPTY_LIST, positionColorOptions = EMPTY_LIST, selectedIds, onToggleSelect }) {
   const resizeRef = useRef(null);
   const [resizePreview, setResizePreview] = useState(null);
   const [selectedKeys, setSelectedKeys] = useState([]);
-  const tableWidth = columns.reduce((total, column) => total + (Number(columnWidths[column.key]) || 120), 88);
+  const selectable = Boolean(onToggleSelect && selectedIds);
+  const tableWidth = columns.reduce((total, column) => total + (Number(columnWidths[column.key]) || 120), 88 + (selectable ? SELECT_COLUMN_WIDTH : 0));
+  const pageSelectedCount = selectable ? rows.filter((row) => selectedIds.has(row.id)).length : 0;
+  const allPageSelected = rows.length > 0 && pageSelectedCount === rows.length;
 
   useEffect(() => {
     const handleMouseMove = (event) => {
@@ -2152,13 +2182,14 @@ const DataTable = memo(function DataTable({ sheet, columns, columnWidths = {}, o
       {resizePreview && <span className="column-resize-preview" style={{ left: `${resizePreview.left}px` }} aria-hidden="true" />}
       <table className="data-table data-table-resizable" style={{ width: `${tableWidth}px` }}>
         <colgroup>
+          {selectable && <col className="select-column" style={{ width: `${SELECT_COLUMN_WIDTH}px` }} />}
           {columns.map((column) => <col key={column.key} style={{ width: `${columnWidths[column.key] || 120}px` }} />)}
           {/* Filler column with no width: absorbs any spare panel width so resizing one column never redistributes the others. */}
           <col className="filler-column" />
           <col className="action-column" style={{ width: '88px' }} />
         </colgroup>
-        <thead><tr>{columns.map((column) => <th key={column.key} onClick={() => toggleSelected(column.key)} title="คลิกเพื่อเลือกหลายคอลัมน์ แล้วลากขอบเพื่อปรับพร้อมกัน" className={[columnSignClass(column.key), column.key === 'netTotal' ? 'align-right' : '', selectedKeys.includes(column.key) ? 'selected-header' : '', !column.editable && column.editable !== undefined ? 'calculated-header' : '', column.type === 'special-position' ? 'special-position-header' : ''].filter(Boolean).join(' ')}><span className="column-header-label">{column.label}</span><span className="column-resizer" role="separator" aria-label={`ปรับความกว้างคอลัมน์ ${column.label}`} onClick={(event) => event.stopPropagation()} onMouseDown={(event) => startResize(event, column)} /></th>)}<th className="filler-header" aria-hidden="true" /><th className="action-header">จัดการ</th></tr></thead>
-        <tbody>{rows.length ? rows.map((row) => <DataTableRow key={row.id || `${sheet}-${row.sequence}-${row.employeeId}`} sheet={sheet} columns={columns} row={row} now={now} onEdit={onEdit} onInlineUpdate={onInlineUpdate} onDelete={onDelete} specialPositionOptions={specialPositionOptions} positionColorOptions={positionColorOptions} />) : <tr><td colSpan={columns.length + 2} className="empty-state"><span className="empty-icon">⌁</span><strong>ยังไม่มีข้อมูลในแท็บนี้</strong><span>กด “เพิ่มรายการ” เพื่อเริ่มบันทึกข้อมูล</span></td></tr>}</tbody>
+        <thead><tr>{selectable && <th className="select-header"><input type="checkbox" checked={allPageSelected} ref={(input) => { if (input) input.indeterminate = pageSelectedCount > 0 && !allPageSelected; }} onChange={(event) => onToggleSelect(rows.map((row) => row.id), event.target.checked)} disabled={!rows.length} title="เลือกทั้งหมดในหน้านี้" aria-label="เลือกทั้งหมดในหน้านี้" /></th>}{columns.map((column) => <th key={column.key} onClick={() => toggleSelected(column.key)} title="คลิกเพื่อเลือกหลายคอลัมน์ แล้วลากขอบเพื่อปรับพร้อมกัน" className={[columnSignClass(column.key), column.key === 'netTotal' ? 'align-right' : '', selectedKeys.includes(column.key) ? 'selected-header' : '', !column.editable && column.editable !== undefined ? 'calculated-header' : '', column.type === 'special-position' ? 'special-position-header' : ''].filter(Boolean).join(' ')}><span className="column-header-label">{column.label}</span><span className="column-resizer" role="separator" aria-label={`ปรับความกว้างคอลัมน์ ${column.label}`} onClick={(event) => event.stopPropagation()} onMouseDown={(event) => startResize(event, column)} /></th>)}<th className="filler-header" aria-hidden="true" /><th className="action-header">จัดการ</th></tr></thead>
+        <tbody>{rows.length ? rows.map((row) => <DataTableRow key={row.id || `${sheet}-${row.sequence}-${row.employeeId}`} sheet={sheet} columns={columns} row={row} now={now} onEdit={onEdit} onInlineUpdate={onInlineUpdate} onDelete={onDelete} specialPositionOptions={specialPositionOptions} positionColorOptions={positionColorOptions} selected={selectable ? selectedIds.has(row.id) : undefined} onToggleSelect={selectable ? onToggleSelect : undefined} />) : <tr><td colSpan={columns.length + 2 + (selectable ? 1 : 0)} className="empty-state"><span className="empty-icon">⌁</span><strong>ยังไม่มีข้อมูลในแท็บนี้</strong><span>กด “เพิ่มรายการ” เพื่อเริ่มบันทึกข้อมูล</span></td></tr>}</tbody>
       </table>
     </div>
   );
@@ -2169,7 +2200,9 @@ const DataTable = memo(function DataTable({ sheet, columns, columnWidths = {}, o
   && previous.now === next.now
   && sameOptionList(previous.specialPositionOptions, next.specialPositionOptions)
   && sameOptionList(previous.positionColorOptions, next.positionColorOptions)
-  && Boolean(previous.onDelete) === Boolean(next.onDelete));
+  && Boolean(previous.onDelete) === Boolean(next.onDelete)
+  && previous.selectedIds === next.selectedIds
+  && previous.onToggleSelect === next.onToggleSelect);
 
 function PositionBadge({ value, options }) {
   const label = formatCell(value, 'text');
@@ -2473,10 +2506,12 @@ function PayrollPeriodModal({ mode, initialName, period, rowCount, revisionCount
   );
 }
 
-function ConfirmDelete({ row, category, onClose, onConfirm }) {
+function ConfirmDelete({ row, rows, category, onClose, onConfirm }) {
   const isPayroll = category === 'payroll';
   const [deleting, setDeleting] = useState(false);
-  const name = [row.firstName, row.lastName].filter(Boolean).join(' ');
+  const isBulk = Boolean(rows);
+  const name = row ? [row.firstName, row.lastName].filter(Boolean).join(' ') : '';
+  const label = isBulk ? `${rows.length} รายการที่เลือก` : [row.employeeId, name].filter(Boolean).join(' · ') || 'รายการนี้';
 
   const handleConfirm = async () => {
     setDeleting(true);
@@ -2491,12 +2526,12 @@ function ConfirmDelete({ row, category, onClose, onConfirm }) {
     <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !deleting && onClose()}>
       <section className="editor-modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
         <div className="modal-header">
-          <div><div className="eyebrow">{isPayroll ? 'สรุปค่าแรง' : 'อัตราค่าแรง'}</div><h2 id="confirm-title">ลบรายการนี้?</h2></div>
+          <div><div className="eyebrow">{isPayroll ? 'สรุปค่าแรง' : 'อัตราค่าแรง'}</div><h2 id="confirm-title">{isBulk ? `ลบ ${rows.length} รายการ?` : 'ลบรายการนี้?'}</h2></div>
         </div>
-        <p className="confirm-text">ต้องการลบ <strong>{[row.employeeId, name].filter(Boolean).join(' · ') || 'รายการนี้'}</strong> ออกจากตาราง{isPayroll ? 'ค่าแรงรายงวด (ไม่กระทบตารางอัตราค่าแรง) การลบจะมีผลเมื่อบันทึก Revision' : 'อัตราค่าแรง การลบไม่สามารถกู้คืนได้'}</p>
+        <p className="confirm-text">ต้องการลบ <strong>{label}</strong> ออกจากตาราง{isPayroll ? 'ค่าแรงรายงวด (ไม่กระทบตารางอัตราค่าแรง) การลบจะมีผลเมื่อบันทึก Revision' : 'อัตราค่าแรง การลบไม่สามารถกู้คืนได้'}</p>
         <div className="modal-footer">
           <button className="secondary-button" onClick={onClose} disabled={deleting}>ยกเลิก</button>
-          <button className="danger-button" onClick={handleConfirm} disabled={deleting}>{deleting ? 'กำลังลบ...' : 'ลบรายการ'}</button>
+          <button className="danger-button" onClick={handleConfirm} disabled={deleting}>{deleting ? 'กำลังลบ...' : isBulk ? `ลบ ${rows.length} รายการ` : 'ลบรายการ'}</button>
         </div>
       </section>
     </div>

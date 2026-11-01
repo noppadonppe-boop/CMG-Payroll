@@ -20,6 +20,16 @@ const todayIso = () => iso(new Date());
 const endOfMonthIso = () => { const now = new Date(); return iso(new Date(now.getFullYear(), now.getMonth() + 1, 0)); };
 
 const nameKey = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+// The rates `project` field is a list joined with ", " (see syncMasterEmployees).
+const rateProjectParts = (row) => String(row.project || '').split(/\s*,\s*/).filter(Boolean);
+// A rate project entry belongs to a project when it equals the project's name or code, or contains
+// either as a whole word ("J74", "J74 BUILDING GMTP", "BUILDING GMTP (J74)" all match J74 / BUILDING GMTP).
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const projectMatcher = (project) => {
+  const patterns = [project.name, project.code].map(nameKey).filter(Boolean)
+    .map((token) => new RegExp(`(^|[^a-z0-9฀-๿])${escapeRegExp(token)}($|[^a-z0-9฀-๿])`));
+  return (part) => patterns.some((pattern) => pattern.test(nameKey(part)));
+};
 const shiftTime = (shift) => (shift ? `${shift.startTime}–${shift.endTime}` : '');
 const statusOf = (item, today) => (item.endDate < today ? 'ended' : item.startDate > today ? 'upcoming' : 'active');
 const STATUS_LABEL = { active: 'กำลังใช้', upcoming: 'ยังไม่เริ่ม', ended: 'สิ้นสุดแล้ว' };
@@ -56,22 +66,24 @@ export default function ShiftAssignTab({ projects, rateRows = [], canEdit, onNot
   // Assignments whose shift was deleted are ignored everywhere.
   const allAssignments = useMemo(() => Object.values(assignmentsByProject).flat().filter((item) => shiftsById.has(item.shiftId)), [assignmentsByProject, shiftsById]);
 
-  // Employees of each project from the rate table's `project` list (same matching as โครงการ refresh).
+  // Employees of each project from the rate table's `project` list (see projectMatcher).
   const employeesByProject = useMemo(() => {
     const result = {};
     projects.forEach((project) => {
-      const target = nameKey(project.name);
+      const matches = projectMatcher(project);
       const seen = new Map();
       rateRows.forEach((row) => {
         const key = employeeKey(row.employeeId);
         if (!key || seen.has(key)) return;
-        if (!String(row.project || '').split(/\s*,\s*/).some((part) => nameKey(part) === target)) return;
-        seen.set(key, { employeeId: String(row.employeeId).trim(), name: `${row.firstName || ''} ${row.lastName || ''}`.trim() || String(row.employeeId), position: row.position || '', department: row.department || '' });
+        if (!rateProjectParts(row).some(matches)) return;
+        seen.set(key, { employeeId: String(row.employeeId).trim(), name: `${row.firstName || ''} ${row.lastName || ''}`.trim() || String(row.employeeId), position: row.position || '', department: row.teamName || row.department || '' });
       });
       result[project.id] = [...seen.values()].sort((a, b) => a.department.localeCompare(b.department, 'th') || a.employeeId.localeCompare(b.employeeId, 'th'));
     });
     return result;
   }, [projects, rateRows]);
+  // Distinct project values in the rates, shown when a project matches nobody so the mismatch is visible.
+  const rateProjectNames = useMemo(() => [...new Set(rateRows.flatMap(rateProjectParts).map((part) => part.trim().replace(/\s+/g, ' ')))].sort((a, b) => a.localeCompare(b, 'th')), [rateRows]);
 
   const loaded = projects.every((project) => shiftsByProject[project.id] !== undefined);
   const withShifts = projects.filter((project) => shiftsByProject[project.id]?.length);
@@ -86,6 +98,7 @@ export default function ShiftAssignTab({ projects, rateRows = [], canEdit, onNot
         shiftsById={shiftsById}
         allAssignments={allAssignments}
         employees={employeesByProject[project.id] || []}
+        rateProjectNames={rateProjectNames}
         canEdit={canEdit}
         onNotify={onNotify}
         onBack={() => setSelected(null)}
@@ -130,7 +143,7 @@ export default function ShiftAssignTab({ projects, rateRows = [], canEdit, onNot
   );
 }
 
-function ShiftAssignDetail({ project, shift, shiftsById, allAssignments, employees, canEdit, onNotify, onBack }) {
+function ShiftAssignDetail({ project, shift, shiftsById, allAssignments, employees, rateProjectNames, canEdit, onNotify, onBack }) {
   const [search, setSearch] = useState('');
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null); // assignment
@@ -203,7 +216,7 @@ function ShiftAssignDetail({ project, shift, shiftsById, allAssignments, employe
         </div>
       </section>
 
-      {adding && <AssignModal project={project} shift={shift} shiftsById={shiftsById} employees={employees} allAssignments={allAssignments} onNotify={onNotify} onClose={() => setAdding(false)} />}
+      {adding && <AssignModal project={project} shift={shift} shiftsById={shiftsById} employees={employees} rateProjectNames={rateProjectNames} allAssignments={allAssignments} onNotify={onNotify} onClose={() => setAdding(false)} />}
       {editing && <EditRangeModal project={project} shift={shift} shiftsById={shiftsById} assignment={editing} allAssignments={allAssignments} onNotify={onNotify} onClose={() => setEditing(null)} />}
     </div>
   );
@@ -223,7 +236,7 @@ function DateRangeFields({ startDate, endDate, onChange }) {
 // Add employees to a shift: one list grouped by ชุด (department). Each group header selects the
 // whole ชุด, each row selects one person. Anyone who already has a shift on any day of the chosen
 // range is disabled with the conflicting shift named.
-function AssignModal({ project, shift, shiftsById, employees, allAssignments, onNotify, onClose }) {
+function AssignModal({ project, shift, shiftsById, employees, rateProjectNames = [], allAssignments, onNotify, onClose }) {
   const [range, setRange] = useState({ startDate: todayIso(), endDate: endOfMonthIso() });
   const [search, setSearch] = useState('');
   const [picked, setPicked] = useState(() => new Set());
@@ -248,6 +261,15 @@ function AssignModal({ project, shift, shiftsById, employees, allAssignments, on
     visible.forEach((employee) => { const key = employee.department || 'ไม่ระบุชุด'; map.set(key, [...(map.get(key) || []), employee]); });
     return [...map.entries()];
   }, [visible]);
+  // ชุด groups start collapsed; a search shows every matching group expanded.
+  const [openGroups, setOpenGroups] = useState(() => new Set());
+  const isOpen = (department) => Boolean(term) || openGroups.has(department);
+  const toggleGroup = (department) => setOpenGroups((current) => {
+    const next = new Set(current);
+    if (next.has(department)) next.delete(department); else next.add(department);
+    return next;
+  });
+  const allOpen = groups.length > 0 && groups.every(([department]) => isOpen(department));
   // Picks that became unavailable after a date change are dropped from the count and the save.
   const chosen = employees.filter((employee) => picked.has(employeeKey(employee.employeeId)) && available(employee));
 
@@ -286,21 +308,33 @@ function AssignModal({ project, shift, shiftsById, employees, allAssignments, on
           <DateRangeFields {...range} onChange={setRange} />
           <div className="assign-pick-toolbar">
             <div className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ค้นหารหัส ชื่อ ตำแหน่ง ชุด..." /></div>
+            {!term && groups.length > 1 && <button type="button" className="text-button" onClick={() => setOpenGroups(allOpen ? new Set() : new Set(groups.map(([department]) => department)))}>{allOpen ? 'พับทุกชุด' : 'กางทุกชุด'}</button>}
             <label className="assign-check"><input type="checkbox" checked={allVisiblePicked} disabled={!visibleAvailable.length} onChange={(event) => toggle(visible, event.target.checked)} /> เลือกทั้งหมดที่ว่าง ({visibleAvailable.length})</label>
           </div>
           <div className="assign-pick-list">
-            {!employees.length && <div className="shift-empty">ไม่พบพนักงานของโครงการนี้ในตารางอัตราค่าแรง</div>}
+            {!employees.length && (
+              <div className="shift-empty">
+                <strong>ไม่พบพนักงานของโครงการ “{project.name}”{project.code ? ` (${project.code})` : ''} ในตารางอัตราค่าแรง</strong>
+                <p>ระบบจับคู่จากคอลัมน์สถานะโครงการของพนักงาน โดยต้องมีชื่อหรือรหัสโครงการนี้อยู่ · แก้ชื่อ/รหัสโครงการที่เมนูโครงการให้ตรงกับข้อมูลพนักงาน</p>
+                {rateProjectNames.length
+                  ? <p>ค่าโครงการที่มีในตารางอัตราค่าแรง: {rateProjectNames.slice(0, 20).join(', ')}{rateProjectNames.length > 20 ? ` และอีก ${rateProjectNames.length - 20} ค่า` : ''}</p>
+                  : <p>ตารางอัตราค่าแรงยังไม่มีข้อมูลสถานะโครงการ — กด Sync ข้อมูลที่เมนูอัตราค่าแรง</p>}
+              </div>
+            )}
             {employees.length > 0 && !groups.length && <div className="shift-empty">ไม่พบพนักงานที่ค้นหา</div>}
             {groups.map(([department, list]) => {
               const free = list.filter(available);
               const pickedCount = free.filter((employee) => picked.has(employeeKey(employee.employeeId))).length;
               return (
                 <div key={department} className="assign-group">
-                  <label className="assign-group-head">
-                    <input type="checkbox" checked={free.length > 0 && pickedCount === free.length} ref={(input) => { if (input) input.indeterminate = pickedCount > 0 && pickedCount < free.length; }} disabled={!free.length} onChange={(event) => toggle(list, event.target.checked)} />
-                    <strong>{department}</strong><small>ว่าง {free.length}/{list.length} คน{pickedCount ? ` · เลือก ${pickedCount}` : ''}</small>
-                  </label>
-                  {list.map((employee) => {
+                  <div className="assign-group-head">
+                    <input type="checkbox" aria-label={`เลือกทั้งชุด ${department}`} checked={free.length > 0 && pickedCount === free.length} ref={(input) => { if (input) input.indeterminate = pickedCount > 0 && pickedCount < free.length; }} disabled={!free.length} onChange={(event) => toggle(list, event.target.checked)} />
+                    <button type="button" className="assign-group-toggle" aria-expanded={isOpen(department)} onClick={() => toggleGroup(department)}>
+                      <span className="assign-caret">{isOpen(department) ? '▾' : '▸'}</span>
+                      <strong>{department}</strong><small>ว่าง {free.length}/{list.length} คน{pickedCount ? ` · เลือก ${pickedCount}` : ''}</small>
+                    </button>
+                  </div>
+                  {isOpen(department) && list.map((employee) => {
                     const key = employeeKey(employee.employeeId);
                     const conflicts = conflictsByEmployee.get(key);
                     return (

@@ -26,14 +26,6 @@ const commonPayrollColumns = [
   { key: 'note', label: 'หมายเหตุ', type: 'text' },
 ];
 
-const supplyPayrollColumns = commonPayrollColumns
-  .filter((column) => !['positionAllowance', 'phoneAllowance', 'positionPhoneTotal', 'socialSecurity'].includes(column.key))
-  .map((column) => {
-    if (column.key === 'holidayHours') return { ...column, label: 'OT 3 ชม.วันหยุด' };
-    if (column.key === 'holidayHoursAmount') return { ...column, label: 'ยอด OT 3 ชม.วันหยุด' };
-    return column;
-  });
-
 const rateColumns = [
   { key: 'employeeId', label: 'รหัสพนักงาน', type: 'text' },
   { key: 'firstName', label: 'ชื่อ', type: 'text' },
@@ -95,7 +87,7 @@ export const sourceCatalog = {
         headerRow: 6,
         dataStartRow: 7,
         sourceRows: 68,
-        columns: supplyPayrollColumns,
+        columns: commonPayrollColumns,
         description: 'ค่าแรงพนักงานรายวันของชุด SUPPLY',
       },
       ซอ: {
@@ -104,7 +96,7 @@ export const sourceCatalog = {
         headerRow: 6,
         dataStartRow: 7,
         sourceRows: 133,
-        columns: supplyPayrollColumns,
+        columns: commonPayrollColumns,
         description: 'ค่าแรงพนักงานรายวันของชุด ซอ',
       },
     },
@@ -141,6 +133,7 @@ export const menuItems = [
   { id: 'projects', label: 'โครงการ', shortLabel: 'โครงการ' },
   { id: 'rates', label: 'อัตราค่าแรง', shortLabel: 'อัตรา', group: 'global' },
   { id: 'payroll', label: 'สรุปค่าแรง', shortLabel: 'ค่าแรง', group: 'global' },
+  { id: 'holidays', label: 'วันหยุดบริษัท', shortLabel: 'วันหยุด', group: 'global' },
   { id: 'adminWage', label: 'Admin ลงค่าแรง', shortLabel: 'ลงค่าแรง', group: 'wage' },
   { id: 'shifts', label: 'กะการทำงาน', shortLabel: 'กะ', group: 'wage' },
   { id: 'overview', label: 'ภาพรวม', shortLabel: 'ภาพรวม' },
