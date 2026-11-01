@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { deleteShift, saveShift, setDefaultShift, shiftHours, subscribeToShifts } from './lib/shifts';
+import ShiftAssignTab from './ShiftAssignTab';
 
 const ALL_PROJECTS = '__all__';
 const EMPTY_FORM = { name: '', startTime: '07:30', endTime: '16:30', note: '' };
@@ -19,7 +20,8 @@ const runAction = async (action, success, onNotify) => {
 // กะการทำงาน: one table per project, stacked top to bottom. Each shift profile has a start/end
 // time and can be flagged as the project's default, which every employee of the project uses
 // until the ตารางการทำงาน menu assigns a different shift.
-export default function ShiftsPage({ projects, canEdit, onNotify }) {
+export default function ShiftsPage({ projects, rateRows, canEdit, onNotify }) {
+  const [tab, setTab] = useState('profiles'); // 'profiles' | 'assign'
   const [adding, setAdding] = useState(false);
   const [counts, setCounts] = useState({}); // projectId -> number of shifts, filled by each ProjectShifts subscription
   const reportCount = useCallback((projectId, count) => setCounts((current) => (current[projectId] === count ? current : { ...current, [projectId]: count })), []);
@@ -40,11 +42,17 @@ export default function ShiftsPage({ projects, canEdit, onNotify }) {
         <div>
           <div className="eyebrow">WORK SHIFTS</div>
           <h1>กะการทำงาน</h1>
-          <p className="page-description">กำหนดโปรไฟล์กะ (เวลาเริ่ม–จบ) ของแต่ละโครงการ · กะที่ตั้งเป็น Default จะเป็นค่าเริ่มต้นของพนักงานทุกคนในโครงการนั้น และนำไปกำหนดรายคนได้ที่เมนูตารางการทำงาน</p>
+          <p className="page-description">{tab === 'profiles'
+            ? 'กำหนดโปรไฟล์กะ (เวลาเริ่ม–จบ) ของแต่ละโครงการ · กะที่ตั้งเป็น Default จะเป็นค่าเริ่มต้นของพนักงานทุกคนในโครงการนั้น'
+            : 'เลือกการ์ดกะเพื่อเพิ่มพนักงานของโครงการนั้นเข้ากะ พร้อมช่วงวันที่ใช้งาน · พนักงานหนึ่งคนมีได้เพียงกะเดียวต่อวัน'}</p>
         </div>
-        {canEdit && projects.length > 0 && <button type="button" className="primary-button" onClick={() => setAdding(true)}>＋ เพิ่มกะ</button>}
+        {tab === 'profiles' && canEdit && projects.length > 0 && <button type="button" className="primary-button" onClick={() => setAdding(true)}>＋ เพิ่มกะ</button>}
       </section>
-      {projects.length
+      <div className="tabs" role="tablist" aria-label="แท็บกะการทำงาน">
+        <button type="button" role="tab" aria-selected={tab === 'profiles'} className={`tab-button ${tab === 'profiles' ? 'active' : ''}`} onClick={() => setTab('profiles')}>โปรไฟล์กะ</button>
+        <button type="button" role="tab" aria-selected={tab === 'assign'} className={`tab-button ${tab === 'assign' ? 'active' : ''}`} onClick={() => setTab('assign')}>ตั้งกะการทำงาน</button>
+      </div>
+      {tab === 'assign' ? <ShiftAssignTab projects={projects} rateRows={rateRows} canEdit={canEdit} onNotify={onNotify} /> : projects.length
         ? <>
             <div className="shift-grid">{projects.map((project) => <ProjectShifts key={project.id} project={project} canEdit={canEdit} onNotify={onNotify} onCount={reportCount} />)}</div>
             {loaded && !hasShifts && <div className="period-empty"><strong>ยังไม่มีกะการทำงาน</strong><span>กด “เพิ่มกะ” ด้านบนเพื่อเลือกโครงการและสร้างกะแรก</span></div>}
@@ -75,7 +83,7 @@ function ProjectShifts({ project, canEdit, onNotify, onCount }) {
   };
   const makeDefault = (shift) => run(() => setDefaultShift({ projectId: project.id, shifts, shiftId: shift.id }), `ตั้ง “${shift.name}” เป็น Default ของโครงการ ${project.name} แล้ว`);
   const remove = (shift) => {
-    if (!window.confirm(`ลบกะ “${shift.name}”?${shift.isDefault ? '\n\nนี่คือกะ Default ของโครงการ หลังลบจะไม่มี Default จนกว่าจะตั้งใหม่' : ''}`)) return;
+    if (!window.confirm(`ลบกะ “${shift.name}”?\n\nรายการตั้งกะการทำงานของพนักงานที่ใช้กะนี้จะถูกลบด้วย${shift.isDefault ? '\nนี่คือกะ Default ของโครงการ หลังลบจะไม่มี Default จนกว่าจะตั้งใหม่' : ''}`)) return;
     run(() => deleteShift({ projectId: project.id, shiftId: shift.id }), 'ลบกะแล้ว');
   };
 

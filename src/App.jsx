@@ -1437,7 +1437,7 @@ function Workspace() {
         {!menuAllowed ? null : activeMenu === 'projects' ? (
           <ProjectsPage projects={allProjects} rateRows={rateRows} onNotify={setToast} />
         ) : activeMenu === 'shifts' ? (
-          <ShiftsPage projects={projects} canEdit={isMasterAdmin} onNotify={setToast} />
+          <ShiftsPage projects={projects} rateRows={rateRows} canEdit={isMasterAdmin} onNotify={setToast} />
         ) : activeMenu === 'users' ? (
           <UserManagementPage users={users} projects={allProjects} loaded={usersLoaded} onNotify={setToast} />
         ) : activeMenu === 'overview' ? (
