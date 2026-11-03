@@ -291,6 +291,13 @@ const uploadAttachments = async ({ category, sheet, recordId, files }) => {
   }));
 };
 
+// Reuse the existing attachment storage layout for wage request evidence.
+export const uploadWageAttachments = async (files) => {
+  if (!isFirebaseConfigured) throw new Error('ยังไม่ได้ตั้งค่า Firebase จึงแนบไฟล์ไม่ได้');
+  await ensureFirebaseReady();
+  return uploadAttachments({ category: 'payroll', sheet: 'wageRequests', recordId: crypto.randomUUID(), files });
+};
+
 export const subscribeToDataset = ({ category, sheet, onData, onError }) => {
   if (!isFirebaseConfigured) {
     onData(sortRows(mockDatasets[category]?.[sheet] || []));

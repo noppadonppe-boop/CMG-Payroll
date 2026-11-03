@@ -1,3 +1,4 @@
+import { nextDate } from './lib/biotimeScans';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { fetchBiotimePunches, saveBiotimeAttendance, saveBiotimeOverride, subscribeToBiotimeAttendance } from './lib/biotime';
 import { attachLeadIn, buildEmployeeReport, formatReportDate, leadInStartDate, parseTime } from './lib/biotimeReport';
@@ -19,8 +20,8 @@ async function runJob({ period, chosen }) {
   try {
     // Also fetch the days before the period that the first Sunday's 6-day check needs.
     const leadIn = leadInStartDate(period.startDate, period.endDate);
-    const punches = await fetchBiotimePunches({ startDate: leadIn || period.startDate, endDate: period.endDate });
-    const result = await saveBiotimeAttendance({ period, employees: chosen, punches, leadInStartDate: leadIn });
+    const { punches, schedules } = await fetchBiotimePunches({ startDate: leadIn || period.startDate, endDate: nextDate(period.endDate) });
+    const result = await saveBiotimeAttendance({ period, employees: chosen, punches, schedules, leadInStartDate: leadIn });
     setJob(period.id, { ...base, status: 'done', finishedAt: Date.now(), message: `บันทึกแล้ว ${result.employees} คน · ${result.days} วันที่มีการสแกน (จากสแกนทั้งหมด ${punches.length} ครั้ง)` });
   } catch (loadError) {
     setJob(period.id, { ...base, status: 'error', finishedAt: Date.now(), message: loadError.message || 'ดึงข้อมูล Biotime ไม่สำเร็จ' });
@@ -30,7 +31,7 @@ async function runJob({ period, chosen }) {
 // Biotime tab of a payroll period. "ดึงและบันทึกลง Firebase" opens a modal to pick employees
 // from the period's payroll table, then fetches the Biotime scan times for the
 // period's Start–End dates, saves it to Firebase and shows the saved rows.
-export default function BiotimePanel({ period, employees, previousByEmployee, shiftFor, holidayFor, PaginationControls }) {
+export default function BiotimePanel({ period, employees, previousByEmployee, shiftFor, holidayFor, wageEntries, PaginationControls }) {
   const [saved, setSaved] = useState([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
@@ -100,14 +101,14 @@ export default function BiotimePanel({ period, employees, previousByEmployee, sh
     // Older saved records lack name/department/position, so fill gaps from the period's payroll row.
     const live = employees.find((employee) => employeeKey(employee.employeeId) === employeeKey(detail.employeeId)) || {};
     const record = attachLeadIn({ ...detail, ...Object.fromEntries(['name', 'firstName', 'lastName', 'department', 'position'].map((key) => [key, detail[key] || live[key] || ''])) }, previousByEmployee?.get(employeeKey(detail.employeeId)));
-    return <BiotimeEmployeeReport periodId={period?.id} record={record} shiftFor={shiftFor} holidayFor={holidayFor} onBack={goBack} />;
+    return <BiotimeEmployeeReport periodId={period?.id} record={record} shiftFor={shiftFor} holidayFor={holidayFor} wageEntries={wageEntries} onBack={goBack} />;
   }
 
   return (
     <>
       <section className="data-panel">
         <div className="data-panel-toolbar">
-          <div><h2>การลงเวลา Biotime</h2><p>เวลาสแกนครั้งแรก/ครั้งสุดท้ายของแต่ละวัน{canLoad ? ` · ${dateLabel(period.startDate)} – ${dateLabel(period.endDate)}` : ''} · ข้อมูลที่บันทึกไว้ใน Firebase</p></div>
+          <div><h2>การลงเวลา Biotime</h2><p>เวลาเข้า–ออกตามกะ · กรองสแกนซ้ำภายใน 2 ชั่วโมง{canLoad ? ` · ${dateLabel(period.startDate)} – ${dateLabel(period.endDate)}` : ''} · ข้อมูลที่บันทึกไว้ใน Firebase</p></div>
           <div className="toolbar-controls">
             <div className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ค้นหารหัสหรือชื่อ..." /></div>
             <button type="button" className="primary-button" onClick={() => setModalOpen(true)} disabled={!canLoad}>ดึงและบันทึกลง Firebase</button>
@@ -269,7 +270,22 @@ function TimeOverrideCell({ raw, override, onChange }) {
 }
 
 // Per-employee report in the layout of the HR sample sheet: one line per date of the period.
-function BiotimeEmployeeReport({ periodId, record, shiftFor, holidayFor, onBack }) {
+const WAGE_REQUEST_STATUS = { pending: 'รออนุมัติ', approved: 'อนุมัติแล้ว', rejected: 'ไม่อนุมัติ' };
+
+// Requests from Admin ลงค่าแรง of this employee, grouped by date, as short alert texts.
+function wageAlertsByDate(wageEntries, employeeId) {
+  const map = new Map();
+  (wageEntries || []).filter((entry) => employeeKey(entry.employeeId) === employeeKey(employeeId)).forEach((entry) => {
+    const types = [(entry.special ?? (!entry.wageDrop && !entry.timeRequest)) && 'ลงค่าตำแหน่งพิเศษ', entry.wageDrop && 'ค่าแรงตก', entry.timeRequest && ('ขอเพิ่มเวลา ' + [entry.timeInEnabled && ('เข้า ' + entry.timeIn), entry.timeOutEnabled && ('ออก ' + entry.timeOut)].filter(Boolean).join(' / ') + ' เหตุผล: ' + entry.timeReason)].filter(Boolean).join(' + ');
+    const text = `${types} (${WAGE_REQUEST_STATUS[entry.status || 'approved'] || entry.status})`;
+    const current = map.get(entry.date) || { texts: [], approved: true };
+    map.set(entry.date, { texts: [...current.texts, text], approved: current.approved && (entry.status || 'approved') === 'approved' });
+  });
+  return map;
+}
+
+function BiotimeEmployeeReport({ periodId, record, shiftFor, holidayFor, wageEntries, onBack }) {
+  const wageAlerts = useMemo(() => wageAlertsByDate(wageEntries, record.employeeId), [wageEntries, record.employeeId]);
   const { rows, totals } = useMemo(() => buildEmployeeReport(record, shiftFor, holidayFor), [record, shiftFor, holidayFor]);
   const [saveError, setSaveError] = useState('');
   const saveOverride = (date, field, value) => {
@@ -301,7 +317,7 @@ function BiotimeEmployeeReport({ periodId, record, shiftFor, holidayFor, onBack 
         <div>
           <button type="button" className="secondary-button period-back-button" onClick={onBack}>← รายชื่อ</button>
           <h2>{record.employeeId} · {record.name || '-'}</h2>
-          <p>{record.department || '-'} · {record.position || '-'} · {formatReportDate(record.startDate)} – {formatReportDate(record.endDate)} · วันหยุดบริษัทยังไม่มีข้อมูลปฏิทิน{assignedDays ? ` · ใช้เวลากะจากตั้งกะการทำงาน ${assignedDays} วัน` : ''}</p>
+          <p>{record.department || '-'} · {record.position || '-'} · {formatReportDate(record.startDate)} – {formatReportDate(record.endDate)} · วันหยุดบริษัทยังไม่มีข้อมูลปฏิทิน{assignedDays ? ` · ${record.scheduleSource === 'biotime' ? 'ใช้ตารางกะ Biotime' : 'ใช้กะเดิม · กรุณาดึง Biotime ใหม่'} ${assignedDays} วัน` : ''}</p>
           {sundaysAsNormal > 0 && <p style={{ color: '#b45309', fontWeight: 600 }}>⚠ วันอาทิตย์ {sundaysAsNormal} วันคิดเป็นวันทำงานปกติ เพราะไม่ได้ทำงานต่อเนื่องครบ 6 วันก่อนหน้า</p>}
           {record.leadInStartDate && <p style={{ color: '#6b7280' }}>แถวสีเทา = วันก่อนงวด ({formatReportDate(record.leadInStartDate)} ขึ้นไป{record.leadInSource === 'previous' ? ' · จากข้อมูลงวดก่อนหน้า' : ''}) แสดงเพื่อตรวจการทำงานต่อเนื่อง 6 วันของวันอาทิตย์แรก · ไม่นำมาคำนวณ</p>}
           {unverified && <p style={{ color: '#6b7280' }}>⚠ ไม่มีข้อมูลวันก่อนงวด · กด “ดึงและบันทึกลง Firebase” ใหม่เพื่อดึงวันก่อนงวดมาตรวจด้วย</p>}
@@ -320,17 +336,18 @@ function BiotimeEmployeeReport({ periodId, record, shiftFor, holidayFor, onBack 
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.date} className={row.leadIn ? 'biotime-lead-in-row' : undefined} style={row.leadIn ? undefined : row.holidayName ? { background: '#e8f7ee' } : row.sundayAsNormal ? { background: '#fff4d6' } : row.isSunday ? { background: '#fde4e4' } : undefined}>
+              <tr key={row.date} className={row.leadIn ? 'biotime-lead-in-row' : wageAlerts.has(row.date) ? (wageAlerts.get(row.date).approved ? 'bt-wage-row approved' : 'bt-wage-row') : undefined} style={row.leadIn || wageAlerts.has(row.date) ? undefined : row.holidayName ? { background: '#e8f7ee' } : row.sundayAsNormal ? { background: '#fff4d6' } : row.isSunday ? { background: '#fde4e4' } : undefined}>
                 <td>{record.employeeId}</td><td>{record.firstName || '-'}</td><td>{record.lastName || '-'}</td><td>{record.department || '-'}</td><td>{record.position || '-'}</td>
                 <td>{formatReportDate(row.date)}</td>
                 <td style={{ whiteSpace: 'nowrap' }}>
                   {row.weekday}
                   {row.leadIn && <small title="วันก่อนเริ่มงวด แสดงเพื่อตรวจการทำงานต่อเนื่อง 6 วันของวันอาทิตย์เท่านั้น" className="biotime-lead-in-tag">ก่อนงวด · ไม่นำมาคำนวณ</small>}
+                  {!row.leadIn && wageAlerts.get(row.date)?.texts.map((text) => <small key={text} className={`bt-wage-alert${wageAlerts.get(row.date).approved ? ' approved' : ''}`} title={text}>🔔 {text}</small>)}
                   {row.holidayName && <small title={`วันหยุดบริษัท: ${row.holidayName}`} style={{ marginLeft: 6, color: '#15803d', fontSize: 10, fontWeight: 600 }}>🎌 {row.holidayName}</small>}
                   {row.sundayAsNormal && <small title="ไม่ได้ทำงานต่อเนื่องครบ 6 วันก่อนวันอาทิตย์ จึงคิดเป็นวันทำงานปกติ" style={{ marginLeft: 6, color: '#b45309', fontSize: 10, fontWeight: 600 }}>⚠ คิดเป็นวันปกติ (ทำไม่ครบ 6 วัน)</small>}
                   {row.sundayUnverified && <small title="ไม่มีข้อมูลสแกนของวันก่อนเริ่มงวด จึงตรวจสอบการทำงานต่อเนื่อง 6 วันได้ไม่ครบ" style={{ marginLeft: 6, color: '#6b7280', fontSize: 10 }}>⚠ ตรวจ 6 วันไม่ครบ (ก่อนงวด)</small>}
                 </td>
-                <td title={row.shiftName ? `กะ ${row.shiftName} (ตั้งกะการทำงาน)` : undefined}>{row.shiftStart}</td><td>{row.shiftEnd}</td><td>{row.deviceIn || '-'}</td><td>{row.deviceOut || '-'}</td>
+                <td title={row.shiftName ? `กะ ${row.shiftName} (ตั้งกะการทำงาน) · เข้างานสายได้ ${row.lateGraceMinutes || 0} นาที` : undefined}>{row.shiftStart}{row.lateGraceMinutes > 0 && <small style={{ display: 'block' }}>สายได้ {row.lateGraceMinutes} นาที</small>}</td><td>{row.shiftEnd}</td><td>{row.deviceIn || '-'}</td><td>{row.deviceOut || '-'}</td>
                 {row.leadIn ? (
                   <><td><strong>{row.timeIn || '-'}</strong></td><td><strong>{row.timeOut || '-'}</strong></td></>
                 ) : (
@@ -339,12 +356,12 @@ function BiotimeEmployeeReport({ periodId, record, shiftFor, holidayFor, onBack 
                     <TimeOverrideCell raw={row.rawTimeOut} override={row.overrideOut} onChange={(value) => saveOverride(row.date, 'timeOut', value)} />
                   </>
                 )}
-                <td>{num(row.normal)}</td><td>{num(row.ot)}</td><td>{num(row.sunday)}</td><td>{num(row.holiday)}</td>
+                <td>{row.normal.toFixed(1)}</td><td>{num(row.ot)}</td><td>{num(row.sunday)}</td><td>{num(row.holiday)}</td>
               </tr>
             ))}
           </tbody>
           <tfoot>
-            <tr><td colSpan={13}><strong>Statistics</strong></td><td><strong>{totals.normal.toFixed(2)}</strong></td><td><strong>{totals.ot.toFixed(2)}</strong></td><td><strong>{totals.sunday.toFixed(2)}</strong></td><td><strong>{totals.holiday.toFixed(2)}</strong></td></tr>
+            <tr><td colSpan={13}><strong>Statistics</strong></td><td><strong>{totals.normal.toFixed(1)}</strong></td><td><strong>{totals.ot.toFixed(2)}</strong></td><td><strong>{totals.sunday.toFixed(2)}</strong></td><td><strong>{totals.holiday.toFixed(2)}</strong></td></tr>
           </tfoot>
         </table>
       </div>

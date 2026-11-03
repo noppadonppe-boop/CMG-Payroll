@@ -10,6 +10,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { APP_NAME } from './constants';
+import { validateLateGraceMinutes } from '../lib/attendancePolicy';
 
 // Projects live at `CMG-Payroll/root/projects/{projectId}`, the same layer as
 // `users`. A user only sees the projects a MasterAdmin assigned to them.
@@ -55,13 +56,14 @@ export const subscribeToProjectIds = (projectIds, { onData, onError }) => {
   return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
 };
 
-export const createProject = async ({ name, code = '', description = '' }, creator) => {
+export const createProject = async ({ name, code = '', description = '', lateGraceMinutes = 10 }, creator) => {
   const ref = doc(projectsCollection());
   const now = Timestamp.now();
   await setDoc(ref, {
     name: String(name).trim(),
     code: String(code).trim(),
     description: String(description).trim(),
+    lateGraceMinutes: validateLateGraceMinutes(lateGraceMinutes),
     archived: false,
     status: 'Active',
     createdAt: now,
@@ -74,6 +76,7 @@ export const createProject = async ({ name, code = '', description = '' }, creat
 // Only the changed fields are written so concurrent edits do not clobber each other.
 export const updateProject = (projectId, changes) => updateDoc(projectDocRef(projectId), {
   ...changes,
+  ...('lateGraceMinutes' in changes ? { lateGraceMinutes: validateLateGraceMinutes(changes.lateGraceMinutes) } : {}),
   updatedAt: Timestamp.now(),
 });
 
@@ -120,6 +123,7 @@ export const addProjectsFromRates = async (rateRows, creator) => {
       name,
       code: '',
       description: '',
+      lateGraceMinutes: 10,
       archived: false,
       status: 'Active',
       source: 'rates',

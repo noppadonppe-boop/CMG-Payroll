@@ -1,7 +1,8 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { bangkokDate, wageRequestMonth, wagePeriodForDate, wagePeriodBounds } from './lib/wageRequestPeriod';
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { effectiveNetTotal, effectiveTravelAmount, formatCell, formatCurrency, isCampTravel, isNameRecentlyChanged, menuItems, sourceCatalog, usersMenuItem } from './data/schema';
 import { isFirebaseConfigured, isMasterDatabaseConfigured } from './lib/firebase';
-import { archivePayrollPeriod, deleteDatasetRecord, isRowVisible, loadPayrollRevisionRows, PAYROLL_SAVEDRAFT_STATUS, saveDatasetRecord, savePayrollPeriod, savePayrollRevision, saveColumnSettings, saveSpecialPositionOptions, subscribeToColumnSettings, subscribeToDataset, subscribeToPayrollPeriods, subscribeToPayrollRevisions, subscribeToSpecialPositionOptions, syncMasterEmployees } from './lib/repository';
+import { uploadWageAttachments, archivePayrollPeriod, deleteDatasetRecord, isRowVisible, loadPayrollRevisionRows, PAYROLL_SAVEDRAFT_STATUS, saveDatasetRecord, savePayrollPeriod, savePayrollRevision, saveColumnSettings, saveSpecialPositionOptions, subscribeToColumnSettings, subscribeToDataset, subscribeToPayrollPeriods, subscribeToPayrollRevisions, subscribeToSpecialPositionOptions, syncMasterEmployees } from './lib/repository';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { ProjectProvider, useProjects } from './auth/ProjectContext';
 import ProtectedRoute from './auth/ProtectedRoute';
@@ -10,13 +11,14 @@ import { Spinner, usePathname } from './auth/router';
 import { subscribeToUsers } from './auth/userService';
 import { ProfileModal, ProjectsPage, SidebarProfileCard, TopbarProfileMenu, UserManagementPage } from './auth/ui';
 import BiotimePanel from './BiotimePanel';
-import ShiftsPage from './ShiftsPage';
+import { priorWagePeriod, WageDropPreview } from './WageDropPreview';
 import HolidaysPage from './HolidaysPage';
 import { useHolidays } from './lib/holidays';
 import PayrollDashboard from './PayrollDashboard';
-import { subscribeToBiotimeAttendance } from './lib/biotime';
+import { approveWageTimeRequest, subscribeToBiotimeAttendance } from './lib/biotime';
 import { attachLeadIn, buildEmployeeReport, previousPeriodOf } from './lib/biotimeReport';
 import { useShiftSchedule } from './lib/shiftSchedule';
+import { wageTimeError, wageTypeData } from './lib/wageTimeRequest';
 import './styles.css';
 import './auth/auth.css';
 import './theme-ocean.css';
@@ -113,7 +115,6 @@ const payrollRowFromRate = (rate, sheet, sequence) => {
     normalDays: 0,
     overtime15: 0,
     overtime2Sunday: 0,
-    overtime2Holiday: 0,
     holidayHours: 0,
     travelFormula: 0,
     dailyRate,
@@ -126,7 +127,6 @@ const payrollRowFromRate = (rate, sheet, sequence) => {
     regularWage: 0,
     overtime15Amount: 0,
     overtime2SundayAmount: 0,
-    overtime2HolidayAmount: 0,
     holidayHoursAmount: 0,
     positionPhoneTotal: positionAllowance + phoneAllowance,
     travelAmount: 0,
@@ -250,7 +250,6 @@ const menuPaths = {
   payroll: '/payroll',
   rates: '/rates',
   adminWage: '/admin-wage',
-  shifts: '/shifts',
   holidays: '/holidays',
 };
 
@@ -265,7 +264,9 @@ const menuIdFromPath = (pathname) => {
 const pathForMenu = (menu) => menuPaths[menu] || menuPaths.overview;
 
 // Recomputes the wage amounts of a payroll row after the admin changes days/OT/adjustments.
-const recalcPayrollRow = (row) => {
+// ยอด OT ชม.วันหยุด pays ×2 on DC and ×3 on the other sheets (SUPPLY, ซอ).
+const holidayMultiplierFor = (sheet) => (sheet === 'DC' ? 2 : 3);
+const recalcPayrollRow = (row, sheet) => {
   const num = (value) => Number(value) || 0;
   const round = (value) => Math.round(value * 100) / 100;
   const dailyRate = num(row.dailyRate);
@@ -275,11 +276,10 @@ const recalcPayrollRow = (row) => {
   const regularWage = dailyRate * normalDays;
   const overtime15Amount = num(row.overtime15) * overtimeRate15;
   const overtime2SundayAmount = num(row.overtime2Sunday) * hourly * 2;
-  const overtime2HolidayAmount = num(row.overtime2Holiday) * hourly * 2;
-  const holidayHoursAmount = num(row.holidayHours) * hourly * 3;
+  const holidayHoursAmount = num(row.holidayHours) * hourly * holidayMultiplierFor(sheet);
   const positionPhoneTotal = num(row.positionAllowance) + num(row.phoneAllowance);
   const travelAmount = isCampTravel(row.travelRate) ? 0 : num(row.travelRate) * normalDays;
-  const netTotal = regularWage + overtime15Amount + overtime2SundayAmount + overtime2HolidayAmount + holidayHoursAmount
+  const netTotal = regularWage + overtime15Amount + overtime2SundayAmount + holidayHoursAmount
     + positionPhoneTotal + travelAmount + num(row.contractWork) + num(row.wageDrop) - num(row.deduction) - num(row.socialSecurity);
   return {
     ...row,
@@ -288,7 +288,6 @@ const recalcPayrollRow = (row) => {
     regularWage: round(regularWage),
     overtime15Amount: round(overtime15Amount),
     overtime2SundayAmount: round(overtime2SundayAmount),
-    overtime2HolidayAmount: round(overtime2HolidayAmount),
     holidayHoursAmount: round(holidayHoursAmount),
     positionPhoneTotal: round(positionPhoneTotal),
     travelAmount: round(travelAmount),
@@ -304,17 +303,55 @@ const wageFullName = (rate) => `${rate?.firstName || ''} ${rate?.lastName || ''}
 
 // Entry types of Admin ลงค่าแรง. Amounts live in อัตราค่าแรง, so entries only carry a true/false flag per type
 // (older entries have no flags and count as special-position days).
-const entryHasSpecial = (entry) => entry.special ?? !entry.wageDrop;
+const entryHasSpecial = (entry) => entry.special ?? (!entry.wageDrop && !entry.timeRequest);
 const entryHasWageDrop = (entry) => Boolean(entry.wageDrop);
 const newWageEntryId = () => `wage-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
-function WageTypeCheckboxes({ special, wageDrop, onChange }) {
+function WageTypeCheckboxes({ special, wageDrop, timeRequest = false, onChange }) {
   return (
     <div className="wage-type-checks">
-      <label><input type="radio" name="wage-request-type" checked={special && !wageDrop} onChange={() => onChange({ special: true, wageDrop: false })} /> ลงค่าตำแหน่งพิเศษ</label>
-      <label><input type="radio" name="wage-request-type" checked={wageDrop && !special} onChange={() => onChange({ special: false, wageDrop: true })} /> ค่าแรงตก</label>
+      <label><input type="radio" name="wage-request-type" checked={special && !wageDrop} onChange={() => onChange({ special: true, wageDrop: false, timeRequest: false })} /> ลงค่าตำแหน่งพิเศษ</label>
+      <label><input type="radio" name="wage-request-type" checked={wageDrop && !special} onChange={() => onChange({ special: false, wageDrop: true, timeRequest: false })} /> ค่าแรงตก</label>
+      <label><input type="radio" name="wage-request-type" checked={timeRequest} onChange={() => onChange({ special: false, wageDrop: false, timeRequest: true })} /> ขอเพิ่มเวลา</label>
     </div>
   );
+}
+
+function WageTimeFields({ value, onChange, error = '' }) {
+  const uploadId = useId();
+  const [uploadError, setUploadError] = useState('');
+  const [missingFile, setMissingFile] = useState(false);
+  const attachments = value.attachments || [];
+  const fieldError = uploadError || ((!attachments.length && (missingFile || error === 'กรุณาแนบไฟล์ประกอบคำขอ')) ? 'กรุณาแนบไฟล์ประกอบคำขอ' : '');
+  const upload = async (event) => {
+    const input = event.currentTarget;
+    const files = Array.from(input.files || []);
+    if (!files.length) return;
+    setUploadError('');
+    onChange((current) => ({ ...current, uploadPending: true }));
+    try {
+      const uploaded = await uploadWageAttachments(files);
+      onChange((current) => ({ ...current, attachments: [...(current.attachments || []), ...uploaded], uploadPending: false }));
+      setMissingFile(false);
+    } catch (error) {
+      setUploadError('อัปโหลดไฟล์ไม่สำเร็จ กรุณาลองใหม่');
+      onChange((current) => ({ ...current, uploadPending: false }));
+    } finally { input.value = ''; }
+  };
+  if (!value.timeRequest) return null;
+  return <div className="wage-time-fields">
+    <label>เหตุผล<textarea required rows={2} value={value.timeReason || ''} onChange={(event) => onChange({ ...value, timeReason: event.target.value })} /></label>
+    <div className="wage-time-options">{[['timeIn', 'เข้า'], ['timeOut', 'ออก']].map(([field, label]) => <div key={field}>
+      <label><input type="checkbox" checked={Boolean(value[field + 'Enabled'])} onChange={(event) => onChange({ ...value, [field + 'Enabled']: event.target.checked, [field]: event.target.checked ? value[field] || '' : '' })} /> {label}</label>
+      <input type="time" aria-label={'เวลา' + label} disabled={!value[field + 'Enabled']} required={Boolean(value[field + 'Enabled'])} value={value[field] || ''} onChange={(event) => onChange({ ...value, [field]: event.target.value })} />
+    </div>)}</div>
+    <div className={'wage-upload-field' + (fieldError ? ' invalid' : '')}>
+      <label htmlFor={uploadId}>ไฟล์แนบ <span className="wage-upload-required">*</span></label>
+      <input id={uploadId} type="file" multiple required={!attachments.length} disabled={value.uploadPending} aria-invalid={Boolean(fieldError)} aria-describedby={uploadId + '-message'} onInvalid={(event) => { event.preventDefault(); setMissingFile(true); event.currentTarget.focus(); }} onChange={upload} />
+      <small id={uploadId + '-message'} className={fieldError ? 'wage-upload-error' : ''} role={fieldError ? 'alert' : undefined}>{fieldError || (value.uploadPending ? 'กำลังอัปโหลดไฟล์…' : 'ต้องแนบไฟล์ประกอบคำขออย่างน้อย 1 ไฟล์')}</small>
+      {attachments.map((file) => <div className="wage-upload-item" key={file.path || file.url}><a href={file.url} target="_blank" rel="noreferrer">{file.name}</a><button type="button" className="text-button" disabled={value.uploadPending} onClick={() => onChange((current) => ({ ...current, attachments: current.attachments.filter((item) => item !== file) }))}>นำออก</button></div>)}
+    </div>
+  </div>;
 }
 
 // Approval status of an entry. Older entries (saved before approval existed) have no status and count as approved.
@@ -327,6 +364,8 @@ function WageRequestTypeCell({ entry, rate }) {
   return (
     <div className="wage-request-types">
       {entryHasSpecial(entry) && <span className="wage-type-chip special">{rate?.specialPosition || 'ตำแหน่งพิเศษ'}</span>}
+      {entry.timeRequest && <><span className="wage-type-chip time">ขอเพิ่มเวลา</span><small>{[entry.timeInEnabled && ('เข้า ' + entry.timeIn), entry.timeOutEnabled && ('ออก ' + entry.timeOut)].filter(Boolean).join(' · ')}</small><small className="wage-time-reason">เหตุผล: {entry.timeReason}</small></>}
+      {entry.timeRequest && entry.attachments?.map((file) => <a key={file.path || file.url} href={file.url} target="_blank" rel="noreferrer">📎 {file.name}</a>)}
       {entryHasWageDrop(entry) && <span className="wage-type-chip drop">ค่าแรงตก</span>}
     </div>
   );
@@ -341,29 +380,33 @@ const WageStatusBadge = ({ entry }) => (
 
 // Pending: Approve + Reject (MasterAdmin, reject needs a reason), edit, delete.
 // Rejected: edit (goes back to pending) only. Approved: locked.
-function WageEntryActions({ entry, rate, period, siblings = EMPTY_LIST, isMasterAdmin, onSetStatus, onEdit, onRemove }) {
+function WageEntryActions({ previousPeriod, shiftFor, holidayFor, entry, rate, period, siblings = EMPTY_LIST, isMasterAdmin, onSetStatus, onEdit, onRemove }) {
   const status = entryStatus(entry);
+  const [preview, setPreview] = useState(null);
   const [dialog, setDialog] = useState(null);
   const [reason, setReason] = useState('');
   const [form, setForm] = useState({ date: '', special: true, wageDrop: false });
+  const datePeriod = form.wageDrop ? previousPeriod : period;
   const [error, setError] = useState('');
   const close = () => { setDialog(null); setError(''); };
   const openReject = () => { setReason(''); setError(''); setDialog('reject'); };
-  const openEdit = () => { const wageDrop = entryHasWageDrop(entry) && !entryHasSpecial(entry); setForm({ date: entry.date, special: !wageDrop, wageDrop }); setError(''); setDialog('edit'); };
+  const openEdit = () => { const wageDrop = entryHasWageDrop(entry) && !entryHasSpecial(entry); setForm({ ...entry, date: entry.date, special: !entry.timeRequest && !wageDrop, wageDrop }); setError(''); setDialog('edit'); };
   const submitReject = (event) => {
     event.preventDefault();
     if (!reason.trim()) { setError('กรุณาใส่เหตุผลที่ Reject'); return; }
     onSetStatus(entry.id, 'rejected', reason.trim());
     close();
   };
-  const submitEdit = (event) => {
+  const submitEdit = async (event) => {
     event.preventDefault();
+    if (form.wageDrop && !previousPeriod) { setError('ไม่พบงวดก่อนหน้า'); return; }
     if (!form.date) { setError('กรุณาเลือกวันที่'); return; }
-    if ((period?.startDate && form.date < period.startDate) || (period?.endDate && form.date > period.endDate)) { setError('เลือกได้เฉพาะวันที่อยู่ในงวดนี้'); return; }
-    if (!form.special && !form.wageDrop) { setError('กรุณาเลือกประเภทอย่างน้อย 1 อย่าง'); return; }
+    if ((datePeriod?.startDate && form.date < datePeriod.startDate) || (datePeriod?.endDate && form.date > datePeriod.endDate)) { setError(form.wageDrop ? 'เลือกได้เฉพาะวันที่อยู่ในงวดก่อนหน้า' : 'เลือกได้เฉพาะวันที่อยู่ในงวดนี้'); return; }
+    if (wageTimeError(form)) { setError(wageTimeError(form)); return; }
+    if (!form.special && !form.wageDrop && !form.timeRequest) { setError('กรุณาเลือกประเภทอย่างน้อย 1 อย่าง'); return; }
     if (siblings.some((other) => other.id !== entry.id && other.date === form.date && normalizeEmployeeKey(other.employeeId) === normalizeEmployeeKey(entry.employeeId))) { setError('พนักงานคนนี้ถูกลงวันที่นี้แล้ว (ซ้ำ)'); return; }
-    onEdit(entry.id, form);
-    close();
+    if (form.wageDrop) { setPreview([{ ...form, sourcePeriodId: previousPeriod.id }]); return; }
+    try { await onEdit(entry.id, form); close(); } catch (error) { setError(error.message || 'บันทึกคำขอไม่สำเร็จ กรุณาลองใหม่'); }
   };
   return (
     <div className="wage-entry-actions">
@@ -371,7 +414,8 @@ function WageEntryActions({ entry, rate, period, siblings = EMPTY_LIST, isMaster
       {isMasterAdmin && status === 'pending' && <button type="button" className="row-reject-button" onClick={openReject}>Reject</button>}
       {status !== 'approved' && <button type="button" className="row-icon-button" onClick={openEdit} title="แก้ไข" aria-label="แก้ไข">✎</button>}
       {status === 'pending' && <button type="button" className="row-icon-button danger" onClick={() => onRemove(entry.id)} title="ลบ" aria-label="ลบ">🗑</button>}
-      {dialog && (
+      {preview && <WageDropPreview period={previousPeriod} requests={preview} rates={[rate || {}]} shiftFor={shiftFor} holidayFor={holidayFor} onCancel={() => setPreview(null)} onConfirm={async () => { await onEdit(entry.id, preview[0]); setPreview(null); close(); }} />}
+      {dialog && !preview && (
         <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && close()}>
           {dialog === 'reject' ? (
             <form className="editor-modal profile-modal" role="dialog" aria-modal="true" onSubmit={submitReject}>
@@ -387,14 +431,16 @@ function WageEntryActions({ entry, rate, period, siblings = EMPTY_LIST, isMaster
               <div className="modal-header"><div><div className="eyebrow">{entry.employeeId}{rate?.firstName ? ` · ${wageFullName(rate)}` : ''}</div><h2>แก้ไขรายการ</h2></div><button type="button" className="close-button" onClick={close}>×</button></div>
               <div className="profile-modal-body wage-edit-body">
                 {status === 'rejected' && entry.rejectReason && <div className="wage-edit-note reject"><strong>เหตุผลที่ถูก Reject</strong>{entry.rejectReason}</div>}
-                <label className="wage-edit-field"><span>วันที่</span><input type="date" value={form.date} min={period?.startDate || undefined} max={period?.endDate || undefined} onChange={(event) => { setForm({ ...form, date: event.target.value }); setError(''); }} /></label>
+                <label className="wage-edit-field"><span>วันที่</span><input type="date" value={form.date} disabled={form.wageDrop && !previousPeriod} min={datePeriod?.startDate || undefined} max={datePeriod?.endDate || undefined} onChange={(event) => { setForm({ ...form, date: event.target.value }); setError(''); }} /></label>
                 <div className="wage-edit-field">
                   <span>ประเภทคำขอ</span>
                   <div className="wage-edit-types">
-                    <label className={form.special ? 'checked' : ''}><input type="radio" name="wage-edit-type" checked={form.special} onChange={() => { setForm({ ...form, special: true, wageDrop: false }); setError(''); }} /><div><strong>ค่าตำแหน่งพิเศษ</strong><small>{rate?.specialPosition || 'ไม่ได้ระบุตำแหน่งพิเศษ'}</small></div></label>
-                    <label className={form.wageDrop ? 'checked' : ''}><input type="radio" name="wage-edit-type" checked={form.wageDrop} onChange={() => { setForm({ ...form, special: false, wageDrop: true }); setError(''); }} /><div><strong>ค่าแรงตก</strong></div></label>
+                    <label className={form.special ? 'checked' : ''}><input type="radio" name="wage-edit-type" checked={form.special} onChange={() => { setForm({ ...form, special: true, wageDrop: false, timeRequest: false }); setError(''); }} /><div><strong>ค่าตำแหน่งพิเศษ</strong><small>{rate?.specialPosition || 'ไม่ได้ระบุตำแหน่งพิเศษ'}</small></div></label>
+                    <label className={form.wageDrop ? 'checked' : ''}><input type="radio" name="wage-edit-type" checked={form.wageDrop} onChange={() => { setForm({ ...form, special: false, wageDrop: true, timeRequest: false }); setError(''); }} /><div><strong>ค่าแรงตก</strong></div></label>
+                    <label className={form.timeRequest ? 'checked' : ''}><input type="radio" name="wage-edit-type" checked={Boolean(form.timeRequest)} onChange={() => setForm({ ...form, special: false, wageDrop: false, timeRequest: true })} /><div><strong>ขอเพิ่มเวลา</strong></div></label>
                   </div>
                 </div>
+                <WageTimeFields value={form} onChange={setForm} error={error} />
                 {status === 'rejected' && <div className="wage-edit-note">บันทึกแล้วรายการจะกลับเป็น Pending เพื่อรออนุมัติใหม่</div>}
                 {error && <div className="wage-entry-error">{error}</div>}
               </div>
@@ -408,19 +454,25 @@ function WageEntryActions({ entry, rate, period, siblings = EMPTY_LIST, isMaster
 }
 
 // Admin ลงค่าแรง landing page: one row per entry (employee + date). An employee can appear many times, but not twice on the same date.
-function AdminWageRoster({ periods, period, entries, rateByEmployee, positionColorOptions = EMPTY_LIST, loading, isMasterAdmin, onSelectPeriod, onAddEntries, onSetStatus, onEditEntry, onRemoveEntry, onOpenEmployee }) {
+function AdminWageRoster({ allPeriods, previousPeriod, shiftFor, holidayFor, periods, period, entries, rateByEmployee, positionColorOptions = EMPTY_LIST, loading, isMasterAdmin, onAddEntries, onSetStatus, onEditEntry, onRemoveEntry, onOpenEmployee }) {
   const [adding, setAdding] = useState(false);
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
   const [selected, setSelected] = useState(() => new Set());
+  const [preview, setPreview] = useState(null);
   const [date, setDate] = useState('');
   const [types, setTypes] = useState({ special: true, wageDrop: false });
-  const rows = useMemo(() => [...entries].sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.employeeId).localeCompare(String(b.employeeId))), [entries]);
+  const datePeriod = types.wageDrop ? previousPeriod : null;
+  const [selectedMonth, setSelectedMonth] = useState('');
+  const months = useMemo(() => [...new Set(entries.map((entry) => wageRequestMonth(entry)).filter(Boolean))].sort().reverse(), [entries]);
+  const activeMonth = months.includes(selectedMonth) ? selectedMonth : months[0] || '';
+  const monthLabel = (month) => { const [year, number] = month.split('-').map(Number); return THAI_MONTHS[number - 1] + ' ' + (year + 543); };
+  const rows = useMemo(() => entries.filter((entry) => wageRequestMonth(entry) === activeMonth).sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.employeeId).localeCompare(String(b.employeeId))), [entries, activeMonth]);
   const countByEmployee = useMemo(() => {
     const counts = new Map();
-    entries.forEach((entry) => counts.set(normalizeEmployeeKey(entry.employeeId), (counts.get(normalizeEmployeeKey(entry.employeeId)) || 0) + 1));
+    rows.forEach((entry) => counts.set(normalizeEmployeeKey(entry.employeeId), (counts.get(normalizeEmployeeKey(entry.employeeId)) || 0) + 1));
     return counts;
-  }, [entries]);
+  }, [rows]);
   const people = useMemo(() => new Set(rows.map((row) => normalizeEmployeeKey(row.employeeId))).size, [rows]);
   const closeModal = () => { setAdding(false); setInput(''); setError(''); setSelected(new Set()); setDate(''); setTypes({ special: true, wageDrop: false }); };
   const candidates = useMemo(() => [...rateByEmployee.values()], [rateByEmployee]);
@@ -430,32 +482,35 @@ function AdminWageRoster({ periods, period, entries, rateByEmployee, positionCol
   const allVisibleSelected = visible.length > 0 && visible.every((rate) => selected.has(rate.employeeId));
   const toggle = (ids, checked) => { setSelected((current) => { const next = new Set(current); ids.forEach((id) => (checked ? next.add(id) : next.delete(id))); return next; }); setError(''); };
 
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
     if (!selected.size) { setError('กรุณาเลือกพนักงานอย่างน้อย 1 คน'); return; }
+    if (types.wageDrop && !previousPeriod) { setError('ไม่พบงวดก่อนหน้า จึงยังขอค่าแรงตกไม่ได้'); return; }
     if (!date) { setError('กรุณาเลือกวันที่'); return; }
-    if ((period?.startDate && date < period.startDate) || (period?.endDate && date > period.endDate)) { setError('เลือกได้เฉพาะวันที่อยู่ในงวดนี้'); return; }
-    if (!types.special && !types.wageDrop) { setError('กรุณาเลือกประเภทอย่างน้อย 1 อย่าง'); return; }
+    if ((datePeriod?.startDate && date < datePeriod.startDate) || (datePeriod?.endDate && date > datePeriod.endDate)) { setError(types.wageDrop ? 'เลือกได้เฉพาะวันที่อยู่ในงวดก่อนหน้า' : 'เลือกได้เฉพาะวันที่อยู่ในงวดนี้'); return; }
+    if (wageTimeError(types)) { setError(wageTimeError(types)); return; }
+    if (!types.special && !types.wageDrop && !types.timeRequest) { setError('กรุณาเลือกประเภทอย่างน้อย 1 อย่าง'); return; }
     const duplicates = candidates.filter((rate) => selected.has(rate.employeeId) && entries.some((entry) => entry.date === date && normalizeEmployeeKey(entry.employeeId) === normalizeEmployeeKey(rate.employeeId)));
     if (duplicates.length) { setError(`ลงวันที่นี้แล้ว (ซ้ำ): ${duplicates.map((rate) => rate.employeeId).join(', ')}`); return; }
-    onAddEntries(candidates.filter((rate) => selected.has(rate.employeeId)).map((rate) => ({ id: newWageEntryId(), employeeId: rate.employeeId, date, special: types.special, wageDrop: types.wageDrop, status: 'pending' })));
-    closeModal();
+    const requests = candidates.filter((rate) => selected.has(rate.employeeId)).map((rate) => ({ id: newWageEntryId(), employeeId: rate.employeeId, date, ...wageTypeData(types), ...(types.wageDrop ? { sourcePeriodId: previousPeriod.id } : {}), status: 'pending' }));
+    if (types.wageDrop) { setPreview(requests); return; }
+    try { await onAddEntries(requests); setSelectedMonth(bangkokDate().slice(0, 7)); closeModal(); } catch (error) { setError(error.message || 'บันทึกคำขอไม่สำเร็จ กรุณาลองใหม่'); }
   };
 
   return (
     <div className="page-content dataset-page">
       <section className="page-heading-row">
-        <div><div className="eyebrow">ADMIN</div><h1>Admin ลงค่าแรง</h1><p className="page-description">รายการลงค่าตำแหน่งพิเศษ / ค่าแรงตกของแต่ละงวด · เปลี่ยนงวดเพื่อดูข้อมูลย้อนหลัง ข้อมูลงวดเก่าไม่หาย</p></div>
+        <div><div className="eyebrow">ADMIN</div><h1>Admin ลงค่าแรง</h1><p className="page-description">รวมคำขอทุกประเภทแยกตามเดือนที่สร้างคำขอ · ระบบสร้างแท็บเดือนใหม่เมื่อเพิ่มรายการแรก</p></div>
         <div className="page-heading-actions">
-          <select className="period-select" value={period?.id || ''} onChange={(event) => onSelectPeriod(event.target.value)} disabled={loading || !periods.length} aria-label="งวด">
-            {!periods.length && <option value="">ยังไม่มีงวดที่เปิดลงข้อมูล</option>}
-            {periods.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select>
-          <button type="button" className="primary-button" onClick={() => setAdding(true)} disabled={!periods.length}>＋ เพิ่มรายการ</button>
+          <button type="button" className="primary-button" onClick={() => setAdding(true)} disabled={loading}>＋ เพิ่มรายการ</button>
         </div>
       </section>
+      <div className="wage-month-tabs" role="group" aria-label="เดือนของรายการ">
+        {months.map((month) => <button type="button" key={month} className={month === activeMonth ? 'is-active' : ''} aria-pressed={month === activeMonth} onClick={() => setSelectedMonth(month)}>{monthLabel(month)} <span>{entries.filter((entry) => wageRequestMonth(entry) === month).length}</span></button>)}
+      </div>
+      <div className="wage-type-legend"><span className="wage-type-chip special">ค่าตำแหน่งพิเศษ</span><span className="wage-type-chip drop">ค่าแรงตก</span><span className="wage-type-chip time">ขอเพิ่มเวลา</span></div>
       <section className="data-panel">
-        <div className="table-summary"><span><strong>{people}</strong> คน · <strong>{entries.length}</strong> รายการ{period?.startDate && period?.endDate ? <> · งวด {wageEntryDateLabel(period.startDate)} – {wageEntryDateLabel(period.endDate)}</> : null}</span></div>
+        <div className="table-summary"><span>{activeMonth ? monthLabel(activeMonth) : 'รายการรายเดือน'} · <strong>{people}</strong> คน · <strong>{rows.length}</strong> รายการ</span></div>
         <div className="table-scroll">
           <div className="data-table-stage">
           <table className="data-table" style={{ width: '1420px' }}>
@@ -463,21 +518,22 @@ function AdminWageRoster({ periods, period, entries, rateByEmployee, positionCol
             <thead><tr><th>รหัสพนักงาน</th><th>ชื่อ-นามสกุล</th><th>แผนก</th><th>ตำแหน่ง</th><th>วันที่</th><th>ประเภทคำขอ</th><th>Status</th><th>รายการ</th><th className="action-header">จัดการ</th></tr></thead>
             <tbody>
               {rows.length === 0 ? (
-                <tr><td className="empty-state" colSpan={9}>{periods.length ? 'ยังไม่มีรายการในงวดนี้' : 'ยังไม่มีงวดที่เปิดลงข้อมูล'}<span>{periods.length ? 'กด “เพิ่มรายการ” เพื่อเลือกพนักงาน วันที่ และประเภท' : 'ให้ผู้ดูแลกด “เปิดลงข้อมูล” ที่การ์ดในเมนูสรุปค่าแรงก่อน'}</span></td></tr>
+                <tr><td className="empty-state" colSpan={9}>ยังไม่มีรายการรายเดือน<span>กด “เพิ่มรายการ” เพื่อเลือกพนักงาน วันที่ และประเภท</span></td></tr>
               ) : rows.map((row) => {
                 const key = normalizeEmployeeKey(row.employeeId);
                 const rate = rateByEmployee.get(key);
+                const owner = allPeriods.find((item) => item.id === row.ownerPeriodId);
                 return (
-                  <tr key={row.id}>
+                  <tr key={row.ownerPeriodId + '-' + row.id} className={'wage-entry-row ' + (row.timeRequest ? 'time' : row.wageDrop ? 'drop' : 'special')}>
                     <td><strong className="employee-code">{row.employeeId}</strong></td>
-                    <td className="name-cell"><button type="button" className="name-link" onClick={() => onOpenEmployee(row.employeeId)} title="ดูรายละเอียดรายการของพนักงานคนนี้">{wageFullName(rate) || '-'}</button></td>
+                    <td className="name-cell"><button type="button" className="name-link" onClick={() => onOpenEmployee(row.employeeId, owner)} title="ดูรายละเอียดรายการของพนักงานคนนี้">{wageFullName(rate) || '-'}</button></td>
                     <td>{rate?.department || '-'}</td>
                     <td className="position-cell"><PositionBadge value={rate?.position} options={positionColorOptions} /></td>
                     <td>{wageEntryDateLabel(row.date)}</td>
                     <td><WageRequestTypeCell entry={row} rate={rate} /></td>
                     <td><WageStatusBadge entry={row} /></td>
                     <td>{countByEmployee.get(key) || 0}</td>
-                    <td className="action-cell"><WageEntryActions entry={row} rate={rate} period={period} siblings={entries} isMasterAdmin={isMasterAdmin} onSetStatus={onSetStatus} onEdit={onEditEntry} onRemove={onRemoveEntry} /></td>
+                    <td className="action-cell"><WageEntryActions previousPeriod={priorWagePeriod(allPeriods, owner)} shiftFor={shiftFor} holidayFor={holidayFor} entry={row} rate={rate} period={owner} siblings={owner?.wageEntries || EMPTY_LIST} isMasterAdmin={isMasterAdmin} onSetStatus={(id, status, reason) => onSetStatus(id, status, reason, owner)} onEdit={(id, changes) => onEditEntry(id, changes, owner)} onRemove={(id) => onRemoveEntry(id, owner)} /></td>
                   </tr>
                 );
               })}
@@ -486,15 +542,19 @@ function AdminWageRoster({ periods, period, entries, rateByEmployee, positionCol
           </div>
         </div>
       </section>
-      {adding && (
+      {preview && <WageDropPreview period={previousPeriod} requests={preview} rates={candidates} shiftFor={shiftFor} holidayFor={holidayFor} onCancel={() => setPreview(null)} onConfirm={async () => { await onAddEntries(preview); setSelectedMonth(bangkokDate().slice(0, 7)); setPreview(null); closeModal(); }} />}
+      {adding && !preview && (
         <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}>
           <form className="editor-modal profile-modal wage-add-modal" role="dialog" aria-modal="true" onSubmit={submit}>
-            <div className="modal-header"><div><div className="eyebrow">{period?.name}</div><h2>เพิ่มรายการ</h2></div><button type="button" className="close-button" onClick={closeModal}>×</button></div>
+            <div className="modal-header"><div><div className="eyebrow">ADMIN</div><h2>เพิ่มรายการ</h2></div><button type="button" className="close-button" onClick={closeModal}>×</button></div>
             <div className="profile-modal-body">
+
               <div className="wage-add-options">
-                <label><span>วันที่</span><input type="date" value={date} min={period?.startDate || undefined} max={period?.endDate || undefined} onChange={(event) => { setDate(event.target.value); setError(''); }} /></label>
-                <div><span className="wage-add-label">ประเภท</span><WageTypeCheckboxes special={types.special} wageDrop={types.wageDrop} onChange={(next) => { setTypes(next); setError(''); }} /></div>
+                <label><span>วันที่</span><input type="date" value={date} disabled={types.wageDrop && !previousPeriod} min={datePeriod?.startDate || undefined} max={datePeriod?.endDate || undefined} onChange={(event) => { setDate(event.target.value); setError(''); }} /></label>
+                <div><span className="wage-add-label">ประเภท</span><WageTypeCheckboxes {...types} onChange={(next) => { setTypes({ ...types, ...next }); setDate(next.wageDrop ? previousPeriod?.startDate || '' : ''); setError(''); }} /></div>
               </div>
+              <div className="wage-period-hint">{types.wageDrop && (previousPeriod ? `ขอของงวดก่อนหน้า: ${previousPeriod.name} (${wageEntryDateLabel(previousPeriod.startDate)} – ${wageEntryDateLabel(previousPeriod.endDate)})` : 'ไม่พบงวดก่อนหน้า')}</div>
+              <WageTimeFields value={types} onChange={setTypes} error={error} />
               <input autoFocus value={input} onChange={(event) => setInput(event.target.value)} placeholder="ค้นหารหัส ชื่อ หรือชื่อชุด" />
               <div className="add-rows-table wage-add-table" role="listbox" aria-multiselectable="true">
                 <label className="add-rows-row add-rows-head">
@@ -538,34 +598,44 @@ const WAGE_SHEET_COLUMNS = [
   { label: 'สวัสดิการช่วยเหลือ', width: 150, value: (rate) => (rate.welfareSupport ? formatCurrency(rate.welfareSupport) : '-'), numeric: true },
 ];
 
-function AdminWageEmployeePage({ period, employeeId, rate, entries, positionColorOptions = EMPTY_LIST, isMasterAdmin, onAddEntry, onSetStatus, onEditEntry, onRemoveEntry, onBack }) {
+function AdminWageEmployeePage({ previousPeriod, shiftFor, holidayFor, period, employeeId, rate, entries, positionColorOptions = EMPTY_LIST, isMasterAdmin, onAddEntry, onSetStatus, onEditEntry, onRemoveEntry, onBack }) {
+  const [preview, setPreview] = useState(null);
   const [date, setDate] = useState('');
   const [types, setTypes] = useState({ special: true, wageDrop: false });
+  const datePeriod = types.wageDrop ? previousPeriod : null;
   const [error, setError] = useState('');
   const key = normalizeEmployeeKey(employeeId);
   const mine = useMemo(() => entries.filter((entry) => normalizeEmployeeKey(entry.employeeId) === key).sort((a, b) => String(a.date).localeCompare(String(b.date))), [entries, key]);
 
-  const handleAdd = (event) => {
+  const handleAdd = async (event) => {
     event.preventDefault();
+    if (types.wageDrop && !previousPeriod) { setError('ไม่พบงวดก่อนหน้า จึงยังขอค่าแรงตกไม่ได้'); return; }
     if (!date) { setError('กรุณาเลือกวันที่'); return; }
-    if ((period?.startDate && date < period.startDate) || (period?.endDate && date > period.endDate)) { setError('เลือกได้เฉพาะวันที่อยู่ในงวดนี้'); return; }
-    if (!types.special && !types.wageDrop) { setError('กรุณาเลือกประเภทอย่างน้อย 1 อย่าง'); return; }
+    if ((datePeriod?.startDate && date < datePeriod.startDate) || (datePeriod?.endDate && date > datePeriod.endDate)) { setError(types.wageDrop ? 'เลือกได้เฉพาะวันที่อยู่ในงวดก่อนหน้า' : 'เลือกได้เฉพาะวันที่อยู่ในงวดนี้'); return; }
+    if (wageTimeError(types)) { setError(wageTimeError(types)); return; }
+    if (!types.special && !types.wageDrop && !types.timeRequest) { setError('กรุณาเลือกประเภทอย่างน้อย 1 อย่าง'); return; }
     if (mine.some((entry) => entry.date === date)) { setError('พนักงานคนนี้ถูกลงวันที่นี้แล้ว (ซ้ำ)'); return; }
     setError('');
-    onAddEntry({ employeeId, date, special: types.special, wageDrop: types.wageDrop, status: 'pending' });
+    const request = { employeeId, date, ...wageTypeData(types), ...(types.wageDrop ? { sourcePeriodId: previousPeriod.id } : {}), status: 'pending' };
+    if (types.wageDrop) { setPreview([request]); return; }
+    try { await onAddEntry(request); } catch { setError('บันทึกคำขอไม่สำเร็จ กรุณาลองใหม่'); return; }
     setDate('');
+    setTypes({ special: true, wageDrop: false });
   };
 
   return (
     <div className="page-content">
+      {preview && <WageDropPreview period={previousPeriod} requests={preview} rates={[rate || {}]} shiftFor={shiftFor} holidayFor={holidayFor} onCancel={() => setPreview(null)} onConfirm={async () => { await onAddEntry(preview[0]); setPreview(null); setDate(''); setTypes({ special: true, wageDrop: false }); }} />}
       <section className="page-heading-row payroll-heading-row">
         <div>
           <button type="button" className="text-button" onClick={onBack}>← กลับรายชื่อ</button>
           <div className="wage-employee-title"><div className="eyebrow">ADMIN · {period?.name}</div><h1>{employeeId} · {wageFullName(rate) || '-'}</h1></div>
         </div>
         <form className="wage-entry-form wage-entry-inline" onSubmit={handleAdd}>
-          <input type="date" aria-label="วันที่" value={date} min={period?.startDate || undefined} max={period?.endDate || undefined} onChange={(event) => setDate(event.target.value)} />
-          <WageTypeCheckboxes special={types.special} wageDrop={types.wageDrop} onChange={setTypes} />
+          <input type="date" aria-label="วันที่" value={date} disabled={types.wageDrop && !previousPeriod} min={datePeriod?.startDate || undefined} max={datePeriod?.endDate || undefined} onChange={(event) => setDate(event.target.value)} />
+          <WageTypeCheckboxes {...types} onChange={(next) => { setTypes({ ...types, ...next }); setDate(next.wageDrop ? previousPeriod?.startDate || '' : ''); }} />
+          <div className="wage-period-hint">{types.wageDrop && (previousPeriod ? `ขอของงวดก่อนหน้า: ${previousPeriod.name} (${wageEntryDateLabel(previousPeriod.startDate)} – ${wageEntryDateLabel(previousPeriod.endDate)})` : 'ไม่พบงวดก่อนหน้า')}</div>
+              <WageTimeFields value={types} onChange={setTypes} error={error} />
           <button type="submit" className="primary-button">＋ เพิ่มรายการ</button>
         </form>
       </section>
@@ -596,7 +666,7 @@ function AdminWageEmployeePage({ period, employeeId, rate, entries, positionColo
                   <td>{wageEntryDateLabel(entry.date)}</td>
                   <td><WageRequestTypeCell entry={entry} rate={rate} /></td>
                   <td><WageStatusBadge entry={entry} /></td>
-                  <td className="action-cell"><WageEntryActions entry={entry} rate={rate} period={period} siblings={mine} isMasterAdmin={isMasterAdmin} onSetStatus={onSetStatus} onEdit={onEditEntry} onRemove={onRemoveEntry} /></td>
+                  <td className="action-cell"><WageEntryActions previousPeriod={previousPeriod} shiftFor={shiftFor} holidayFor={holidayFor} entry={entry} rate={rate} period={period} siblings={mine} isMasterAdmin={isMasterAdmin} onSetStatus={onSetStatus} onEdit={onEditEntry} onRemove={onRemoveEntry} /></td>
                 </tr>
               ))}
             </tbody>
@@ -800,6 +870,8 @@ function Workspace() {
 
   const currentPeriodCard = useMemo(() => payrollPeriods.find((item) => item.id === payrollPeriod.id), [payrollPeriods, payrollPeriod.id]);
   const wageEntries = currentPeriodCard?.wageEntries || EMPTY_LIST;
+  const currentWagePeriod = wagePeriodForDate(payrollPeriods, bangkokDate()) || wagePeriodBounds(bangkokDate());
+  const previousCurrentWagePeriod = priorWagePeriod(payrollPeriods, currentWagePeriod);
   const wageOpenPeriods = useMemo(() => payrollPeriods.filter((item) => item.entryOpen !== false), [payrollPeriods]);
   const wageEntryRates = useMemo(() => Object.values(datasets.rates).flat().filter(isRowVisible), [datasets.rates]);
   const wageRateByEmployee = useMemo(() => new Map(wageEntryRates.map((rate) => [normalizeEmployeeKey(rate.employeeId), rate])), [wageEntryRates]);
@@ -842,10 +914,10 @@ function Workspace() {
       const row = attendance ? { ...rawRow, normalDays: attendance.normal, overtime15: attendance.ot, overtime2Sunday: attendance.sunday, holidayHours: attendance.holiday, fromBiotime: true } : rawRow;
       const days = daysByEmployee.get(key) || 0;
       // Net total = วันทำงานปกติ × อัตราค่าแรง (+ ค่าเดินทางที่เป็นตัวเลข × วันทำงาน) — always recomputed from the rates.
-      if (!days && !row.specialFromEntries) return recalcPayrollRow(row);
+      if (!days && !row.specialFromEntries) return recalcPayrollRow(row, sheet);
       const rate = rateByEmployee.get(key);
       const amount = Number(rate?.specialPositionAmount ?? row.specialPositionRate ?? 0);
-      return recalcPayrollRow({ ...row, specialFromEntries: true, specialPositionRate: amount, specialPositionDays: days, positionAllowance: amount * days });
+      return recalcPayrollRow({ ...row, specialFromEntries: true, specialPositionRate: amount, specialPositionDays: days, positionAllowance: amount * days }, sheet);
     })]));
   }, [datasets.payroll, datasets.rates, wageEntries, wageEntryRates, biotimeTotals]);
   const summaryEmployeeIds = useMemo(() => new Set(Object.values(datasets.payroll).flat().map((row) => normalizeEmployeeKey(row.employeeId))), [datasets.payroll]);
@@ -1025,47 +1097,78 @@ function Workspace() {
     openPayrollPeriod(wageOpenPeriods.find((item) => item.id === payrollPeriod.id) || wageOpenPeriods[0]);
   }, [activeMenu, wageOpenPeriods]);
 
-  const saveWagePatch = (patch) => {
-    const card = currentPeriodCard || { ...payrollPeriod, periodId: payrollPeriod.id };
-    upsertPayrollPeriodCard({ ...card, ...patch });
-    savePayrollPeriod({ id: card.id, name: card.name, startDate: card.startDate, endDate: card.endDate, status: card.status, createdAt: card.createdAt, updatedAt: card.updatedAt, ...patch }).catch((error) => {
+  const saveWagePatch = async (patch, targetPeriod) => {
+    const card = targetPeriod || currentPeriodCard || { ...payrollPeriod, periodId: payrollPeriod.id };
+    await savePayrollPeriod({ id: card.id, name: card.name, startDate: card.startDate, endDate: card.endDate, status: card.status, createdAt: card.createdAt, updatedAt: card.updatedAt, ...patch }).catch((error) => {
       console.error('ไม่สามารถบันทึกรายการ Admin ลงค่าแรง', error);
       setToast('บันทึกรายการไม่สำเร็จ กรุณาตรวจสอบการเชื่อมต่อ');
+      throw error;
     });
+    upsertPayrollPeriodCard({ ...card, ...patch });
   };
-  const saveWageEntries = (nextEntries) => saveWagePatch({ wageEntries: nextEntries });
+  const saveWageEntries = (nextEntries, targetPeriod) => saveWagePatch({ wageEntries: nextEntries }, targetPeriod);
 
-  const addWageEntries = (newEntries) => {
-    saveWageEntries([...wageEntries, ...newEntries]);
+  const addWageEntries = async (newEntries) => {
+    if (!newEntries.length) return;
+    const request = newEntries[0];
+    const targetDate = request.wageDrop ? bangkokDate() : request.date;
+    if (request.wageDrop && (!previousCurrentWagePeriod || newEntries.some((entry) => entry.date < previousCurrentWagePeriod.startDate || entry.date > previousCurrentWagePeriod.endDate))) {
+      throw new Error('ค่าแรงตกต้องเป็นวันที่ในรอบก่อนหน้าปัจจุบัน');
+    }
+    let target = wagePeriodForDate(payrollPeriods, targetDate);
+    if (target?.entryOpen === false) throw new Error('รอบของวันที่เลือกปิดลงข้อมูลแล้ว');
+    const createdAt = new Date().toISOString();
+    if (!target) {
+      const bounds = wagePeriodBounds(targetDate);
+      const name = formatPayrollPeriodName(bounds.startDate);
+      target = { id: createPeriodId(name), name, ...bounds, entryOpen: true, status: PAYROLL_SAVEDRAFT_STATUS, createdAt };
+    }
+    const existing = target.wageEntries || [];
+    if (newEntries.some((entry) => existing.some((other) => other.date === entry.date && normalizeEmployeeKey(other.employeeId) === normalizeEmployeeKey(entry.employeeId)))) throw new Error('พนักงานคนนี้ถูกลงวันที่นี้แล้ว (ซ้ำ)');
+    const stamped = newEntries.map((entry) => ({ ...entry, createdAt, ...(entry.wageDrop ? { sourcePeriodId: previousCurrentWagePeriod.id } : {}) }));
+    await saveWageEntries([...existing, ...stamped], target);
     setToast(newEntries.length === 1 ? `เพิ่มรายการ ${newEntries[0].employeeId} วันที่ ${formatThaiDate(newEntries[0].date)} แล้ว` : `เพิ่ม ${newEntries.length} รายการแล้ว`);
   };
 
   const addWageEntry = (entry) => addWageEntries([{ id: newWageEntryId(), ...entry }]);
 
   // Only pending entries can be approved / rejected; an approved entry is locked.
-  const setWageEntryStatus = (entryId, status, reason = '') => {
+  const setWageEntryStatus = async (entryId, status, reason = '', targetPeriod = currentPeriodCard || payrollPeriod) => {
+    const wageEntries = targetPeriod.wageEntries || EMPTY_LIST;
     if (!isMasterAdmin) return;
+    const entry = wageEntries.find((item) => item.id === entryId);
+    if (!entry || entryStatus(entry) !== 'pending') return;
+    if (entry.timeRequest && status === 'approved') {
+      try {
+        const nextEntries = await approveWageTimeRequest({ period: targetPeriod, entryId, employee: wageRateByEmployee.get(normalizeEmployeeKey(entry.employeeId)) || {} });
+        upsertPayrollPeriodCard({ ...targetPeriod, wageEntries: nextEntries });
+        setToast('อนุมัติและเพิ่มเวลาในวันที่ขอแล้ว');
+      } catch (error) { setToast(error.message || 'อนุมัติไม่สำเร็จ กรุณาลองใหม่'); }
+      return;
+    }
     saveWageEntries(wageEntries.map((entry) => {
       if (entry.id !== entryId || entryStatus(entry) !== 'pending') return entry;
       const { rejectReason, ...rest } = entry;
       return status === 'rejected' ? { ...rest, status, rejectReason: reason } : { ...rest, status };
-    }));
+    }), targetPeriod).catch(() => {});
     setToast(status === 'approved' ? 'อนุมัติรายการแล้ว' : 'ปฏิเสธรายการแล้ว');
   };
 
   // Editing a pending / rejected entry sends it back to pending for (re)approval.
-  const editWageEntry = (entryId, changes) => {
-    saveWageEntries(wageEntries.map((entry) => {
+  const editWageEntry = async (entryId, changes, targetPeriod = currentPeriodCard || payrollPeriod) => {
+    const wageEntries = targetPeriod.wageEntries || EMPTY_LIST;
+    await saveWageEntries(wageEntries.map((entry) => {
       if (entry.id !== entryId || isEntryApproved(entry)) return entry;
       const { rejectReason, ...rest } = entry;
-      return { ...rest, date: changes.date, special: changes.special, wageDrop: changes.wageDrop, status: 'pending' };
-    }));
+      return { ...rest, date: changes.date, ...wageTypeData(changes), sourcePeriodId: changes.wageDrop ? changes.sourcePeriodId : '', status: 'pending' };
+    }), targetPeriod);
     setToast('แก้ไขรายการแล้ว');
   };
 
-  const removeWageEntry = (entryId) => {
+  const removeWageEntry = (entryId, targetPeriod = currentPeriodCard || payrollPeriod) => {
+    const wageEntries = targetPeriod.wageEntries || EMPTY_LIST;
     // Only pending entries can be deleted; approved / rejected ones are kept.
-    saveWageEntries(wageEntries.filter((entry) => entry.id !== entryId || entryStatus(entry) !== 'pending'));
+    saveWageEntries(wageEntries.filter((entry) => entry.id !== entryId || entryStatus(entry) !== 'pending'), targetPeriod).catch(() => {});
     setToast('ลบรายการแล้ว');
   };
 
@@ -1362,7 +1465,7 @@ function Workspace() {
       setToast('วันที่ทับกับงวดก่อนหน้า กรุณาเลือกช่วงวันที่ใหม่');
       return false;
     }
-    const normalizedName = `งวดวันที่ ${formatThaiDate(startDate)} – ${formatThaiDate(endDate)}`;
+    const normalizedName = formatPayrollPeriodName(startDate);
     const nextPeriod = {
       id: createPeriodId(normalizedName),
       name: normalizedName,
@@ -1409,10 +1512,19 @@ function Workspace() {
           </div>
         </div>
 
-        <div className="nav-label">เมนูหลัก</div>
-        <nav className="main-nav" aria-label="เมนูหลัก">
+        <div className="nav-label nav-label-group">สรุปรายงาน</div>
+        <nav className="main-nav" aria-label="สรุปรายงาน">
           {visibleMenuItems.filter((item) => !item.group).map(renderNavItem)}
         </nav>
+
+        {visibleMenuItems.some((item) => item.group === 'database') && (
+          <>
+            <div className="nav-label nav-label-group">ฐานข้อมูล</div>
+            <nav className="main-nav" aria-label="ฐานข้อมูล">
+              {visibleMenuItems.filter((item) => item.group === 'database').map(renderNavItem)}
+            </nav>
+          </>
+        )}
 
         {visibleMenuItems.some((item) => item.group === 'global') && (
           <>
@@ -1461,8 +1573,6 @@ function Workspace() {
 
         {!menuAllowed ? null : activeMenu === 'projects' ? (
           <ProjectsPage projects={allProjects} rateRows={rateRows} onNotify={setToast} />
-        ) : activeMenu === 'shifts' ? (
-          <ShiftsPage projects={projects} rateRows={rateRows} canEdit={isMasterAdmin} onNotify={setToast} />
         ) : activeMenu === 'holidays' ? (
           <HolidaysPage holidays={holidays} loaded={holidaysLoaded} canSync={isMasterAdmin} onNotify={setToast} />
         ) : activeMenu === 'users' ? (
@@ -1470,23 +1580,24 @@ function Workspace() {
         ) : activeMenu === 'overview' ? (
           <PayrollDashboard payrollRows={payrollRows} rateRows={rateRows} periods={payrollPeriods} period={payrollPeriod} wageEntries={wageEntries} biotimeRecords={biotimeRecords} shiftFor={shiftFor} holidayFor={holidayFor} onNavigate={selectMenu} />
         ) : activeMenu === 'adminWage' && !wageEmployeeId ? (
-          <AdminWageRoster
+          <AdminWageRoster allPeriods={payrollPeriods}
+            previousPeriod={previousCurrentWagePeriod} shiftFor={shiftFor} holidayFor={holidayFor}
             periods={wageOpenPeriods}
             period={wageOpenPeriods.find((item) => item.id === payrollPeriod.id)}
-            entries={wageEntries}
+            entries={payrollPeriods.flatMap((item) => (item.wageEntries || []).map((entry) => ({ ...entry, ownerPeriodId: item.id })))}
             rateByEmployee={wageRateByEmployee}
             positionColorOptions={positionColorOptions}
             loading={Boolean(openingPeriodId)}
-            onSelectPeriod={(periodId) => { const target = wageOpenPeriods.find((item) => item.id === periodId); if (target) openPayrollPeriod(target); }}
             isMasterAdmin={isMasterAdmin}
             onAddEntries={addWageEntries}
             onSetStatus={setWageEntryStatus}
             onEditEntry={editWageEntry}
             onRemoveEntry={removeWageEntry}
-            onOpenEmployee={setWageEmployeeId}
+            onOpenEmployee={async (employeeId, owner) => { if (owner) await openPayrollPeriod(owner); setWageEmployeeId(employeeId); }}
           />
         ) : activeMenu === 'adminWage' ? (
           <AdminWageEmployeePage
+            previousPeriod={previousCurrentWagePeriod} shiftFor={shiftFor} holidayFor={holidayFor}
             period={currentPeriodCard ? { ...payrollPeriod, startDate: currentPeriodCard.startDate ?? payrollPeriod.startDate, endDate: currentPeriodCard.endDate ?? payrollPeriod.endDate } : payrollPeriod}
             employeeId={wageEmployeeId}
             rate={wageRateByEmployee.get(normalizeEmployeeKey(wageEmployeeId))}
@@ -1524,6 +1635,7 @@ function Workspace() {
             previousBiotimeByEmployee={previousBiotimeByEmployee}
             shiftFor={shiftFor}
             holidayFor={holidayFor}
+            wageEntries={wageEntries}
             onBack={activeMenu === 'payroll' ? () => { setPayrollView('list'); setSearch(''); } : undefined}
             category={activeMenu}
             sheet={activeTabs[activeMenu]}
@@ -1639,7 +1751,7 @@ function PayrollPeriodList({ periods, currentPeriodId, openingId, onOpen, onDele
             {onDelete && <button type="button" className="period-card-delete" onClick={() => onDelete(period)} disabled={Boolean(openingId)} aria-label={`ลบงวด ${period.name}`} title="ลบงวด">🗑</button>}
             <button type="button" className={`period-card ${period.id === currentPeriodId ? 'is-current' : ''}`} onClick={() => onOpen(period)} disabled={Boolean(openingId)}>
               <span className="period-card-top"><span className="period-card-status">{period.status || PAYROLL_SAVEDRAFT_STATUS}</span>{period.id === currentPeriodId && <span className="period-card-current">งวดล่าสุดที่เปิด</span>}</span>
-              <strong className="period-card-name">{period.name}</strong>
+              <strong className="period-card-name">{formatPayrollPeriodName(period.startDate, period.name)}</strong>
               {period.startDate && period.endDate && <span className="period-card-range">{formatThaiDate(period.startDate)} – {formatThaiDate(period.endDate)}</span>}
               <span className="period-card-stats">
                 <span><b>{period.revisionCount || 0}</b> Revision</span>
@@ -1657,7 +1769,7 @@ function PayrollPeriodList({ periods, currentPeriodId, openingId, onOpen, onDele
   );
 }
 
-function DatasetView({ biotimeEmployees = EMPTY_LIST, previousBiotimeByEmployee, shiftFor, holidayFor, onBack, category, sheet, onSheetChange, rows, search, setSearch, onAdd, onEdit, onInlineUpdate, onDelete, onDeleteMany, onSync, onImport, period, revisionCount = 0, onSavePeriod, onOpenNewPeriod, specialPositionOptions, specialPositionColorOptions = [], positionColorOptions = [], onSpecialPositionOptionsChange, syncing, canSyncMaster }) {
+function DatasetView({ biotimeEmployees = EMPTY_LIST, previousBiotimeByEmployee, shiftFor, holidayFor, wageEntries = EMPTY_LIST, onBack, category, sheet, onSheetChange, rows, search, setSearch, onAdd, onEdit, onInlineUpdate, onDelete, onDeleteMany, onSync, onImport, period, revisionCount = 0, onSavePeriod, onOpenNewPeriod, specialPositionOptions, specialPositionColorOptions = [], positionColorOptions = [], onSpecialPositionOptionsChange, syncing, canSyncMaster }) {
   const config = sourceCatalog[category];
   const [payrollSection, setPayrollSection] = useState('table');
   const isBiotimeTab = category === 'payroll' && payrollSection === 'biotime';
@@ -1840,7 +1952,7 @@ function DatasetView({ biotimeEmployees = EMPTY_LIST, previousBiotimeByEmployee,
       </div>}
 
       {isBiotimeTab ? (
-        <BiotimePanel period={period} employees={biotimeEmployees} previousByEmployee={previousBiotimeByEmployee} shiftFor={shiftFor} holidayFor={holidayFor} PaginationControls={PaginationControls} />
+        <BiotimePanel period={period} employees={biotimeEmployees} previousByEmployee={previousBiotimeByEmployee} shiftFor={shiftFor} holidayFor={holidayFor} wageEntries={wageEntries} PaginationControls={PaginationControls} />
       ) : (
       <section className="data-panel">
         <div className="data-panel-toolbar"><div><h2>{tab.label}</h2><p>หัวตารางตรงตามชีตต้นแบบ แถวข้อมูลเริ่มที่แถว {tab.dataStartRow}</p></div><div className="toolbar-controls">{category === 'rates' && <SpecialPositionOptionsManager options={specialPositionOptions} onChange={onSpecialPositionOptionsChange} />}<ColumnSettingsManager columns={tab.columns} settings={columnSettings} onChange={updateColumnSettings} /><div className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ค้นหาพนักงานหรือข้อมูล..." /></div><button className="filter-button">≡ <span>ตัวกรอง</span></button></div></div>
@@ -2096,8 +2208,8 @@ function ColumnSettingsManager({ columns, settings, onChange }) {
 const sameOptionList = (previous = EMPTY_LIST, next = EMPTY_LIST) => previous === next
   || (previous.length === 0 && next.length === 0);
 
-const DEDUCT_COLUMN_KEYS = ['wageDrop', 'deduction', 'socialSecurity'];
-const INCOME_COLUMN_KEYS = ['dailyRate', 'travelRate', 'positionAllowance', 'phoneAllowance', 'overtimeRate15', 'overtime2SundayAmount', 'overtime2HolidayAmount', 'holidayHoursAmount', 'contractWork'];
+const DEDUCT_COLUMN_KEYS = ['deduction', 'socialSecurity'];
+const INCOME_COLUMN_KEYS = ['wageDrop','dailyRate', 'travelRate', 'positionAllowance', 'phoneAllowance', 'overtimeRate15', 'overtime2SundayAmount', 'holidayHoursAmount', 'contractWork'];
 const columnSignClass = (key) => (DEDUCT_COLUMN_KEYS.includes(key) ? 'col-deduct' : INCOME_COLUMN_KEYS.includes(key) ? 'col-income' : '');
 
 const DataTableRow = memo(function DataTableRow({ sheet, columns, row, now, onEdit, onInlineUpdate, onDelete, specialPositionOptions, positionColorOptions, selected, onToggleSelect }) {
@@ -2373,6 +2485,12 @@ function AddPayrollRowsPage({ sheet, period, rates, existingEmployeeIds, onBack,
       </section>
     </div>
   );
+}
+
+function formatPayrollPeriodName(startDate, fallback = '') {
+  const [, month, day] = String(startDate || '').split('-').map(Number);
+  if (!THAI_MONTHS[month - 1] || !day || day < 1 || day > 31) return fallback;
+  return `${THAI_MONTHS[month - 1]} รอบที่ ${day <= 15 ? 1 : 2}`;
 }
 
 function formatThaiDate(value) {

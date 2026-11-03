@@ -2,7 +2,7 @@ import { onRequest } from 'firebase-functions/v2/https';
 import { initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
-import { fetchZkTransactions, validateRange } from './zkteco.js';
+import { fetchZkAttendance, validateRange } from './zkteco.js';
 
 initializeApp();
 
@@ -23,7 +23,7 @@ export const zktecoApi = onRequest({ region: 'asia-southeast1', cors: true }, as
     if (!(await authorize(request))) { response.status(403).json({ error: 'ไม่มีสิทธิ์ใช้งาน' }); return; }
     const { startDate, endDate } = request.method === 'GET' ? request.query : request.body || {};
     if (!validateRange(startDate, endDate)) { response.status(400).json({ error: 'ช่วงวันที่ไม่ถูกต้อง' }); return; }
-    response.json({ punches: await fetchZkTransactions({ startDate, endDate }) });
+    response.json(await fetchZkAttendance({ startDate, endDate }));
   } catch (error) {
     console.error('zkteco', error);
     response.status(502).json({ error: error.message || 'เรียก ZKBioTime ไม่สำเร็จ' });

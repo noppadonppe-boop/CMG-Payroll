@@ -24,7 +24,7 @@ const thaiDate = (iso) => (iso ? new Date(`${iso}T00:00:00`).toLocaleDateString(
 const fullName = (row) => [row.firstName, row.lastName].filter(Boolean).join(' ') || row.employeeId || '-';
 const initialOfName = (row) => String(row.firstName || row.employeeId || '?').trim().replace(/^(นางสาว|นาง|นาย|น\.ส\.|mrs?\.?|ms\.?|miss)\s*/i, '').charAt(0).toUpperCase() || '?';
 
-const overtimeAmount = (row) => num(row.overtime15Amount) + num(row.overtime2SundayAmount) + num(row.overtime2HolidayAmount) + num(row.holidayHoursAmount);
+const overtimeAmount = (row) => num(row.overtime15Amount) + num(row.overtime2SundayAmount) + num(row.holidayHoursAmount);
 const wageStatus = (entry) => entry.status || 'approved';
 
 // Smooth line through the points (Catmull-Rom converted to cubic Béziers).
@@ -56,7 +56,7 @@ function usePayrollStats({ payrollRows, rateRows, periods, period, wageEntries, 
     const deductions = rows.reduce((sum, row) => sum + num(row.deduction) + num(row.socialSecurity), 0);
     const gross = regular + overtime + travel + allowance + extra;
     const workDays = rows.reduce((sum, row) => sum + num(row.normalDays), 0);
-    const otHours = rows.reduce((sum, row) => sum + num(row.overtime15) + num(row.overtime2Sunday) + num(row.overtime2Holiday) + num(row.holidayHours), 0);
+    const otHours = rows.reduce((sum, row) => sum + num(row.overtime15) + num(row.overtime2Sunday) + num(row.holidayHours), 0);
     const paidRows = rows.filter((row) => effectiveNetTotal(row) > 0);
 
     const composition = [

@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
-import { fetchZkTransactions, readZkConfig, validateRange } from './functions/zkteco.js';
+import { fetchZkAttendance, readZkConfig, validateRange } from './functions/zkteco.js';
 
 // Local stand-in for the `zktecoApi` Cloud Function so `npm run dev` works without
 // deploying. Credentials come from the non-VITE_ ZK_* entries in .env.
@@ -14,7 +14,7 @@ const zktecoDevApi = (env) => ({
         const startDate = query.get('startDate');
         const endDate = query.get('endDate');
         if (!validateRange(startDate, endDate)) { send(400, { error: 'ช่วงวันที่ไม่ถูกต้อง' }); return; }
-        send(200, { punches: await fetchZkTransactions({ config: readZkConfig(env), startDate, endDate }) });
+        send(200, await fetchZkAttendance({ config: readZkConfig(env), startDate, endDate }));
       } catch (error) {
         send(502, { error: error.message });
       }

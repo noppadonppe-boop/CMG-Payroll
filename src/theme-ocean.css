@@ -177,6 +177,18 @@ body {
 .multi-select-tag, .role-chip.master, .user-filter .secondary-button.active { background: var(--accent-soft); color: var(--ocean-blue); }
 .shift-register .shift-pill { background: var(--accent-soft); color: var(--ocean-blue); }
 .wage-type-chip { background: #e6f1fd; color: #1d55b8; }
+.wage-type-chip.special { background: #e0edff; color: #184f9c; }
+.wage-type-chip.drop { background: #fff0d6; color: #895000; }
+.wage-type-chip.time { background: #eee5ff; color: #6835a5; }
+.wage-type-legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.wage-type-legend .wage-type-chip { padding: 6px 12px; font-size: 13px; font-weight: 700; }
+.wage-month-tabs { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 10px; }
+.wage-month-tabs button { flex-shrink: 0; border: 1px solid #c8dcf3; border-radius: 12px; background: #f5faff; color: #315677; padding: 12px 18px; font: inherit; cursor: pointer; }
+.wage-month-tabs button.is-active { background: #1f6bf0; border-color: #1f6bf0; color: white; font-weight: 700; }
+.wage-month-tabs button span { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 12px; background: rgba(130, 175, 235, .22); }
+.wage-entry-row.special td:first-child { border-left: 4px solid #4385d8; }
+.wage-entry-row.drop td:first-child { border-left: 4px solid #d6992c; }
+.wage-entry-row.time td:first-child { border-left: 4px solid #9360ce; }
 .wage-edit-types label.checked { border-color: var(--ocean-blue); background: #eef5fe; }
 .row-icon-button:hover { background: var(--accent-soft); }
 .name-link:hover { color: var(--ocean-blue); }
@@ -211,6 +223,10 @@ body {
 .data-table-stage { box-shadow: none; }
 .data-table thead th, .data-table thead th.calculated-header, .data-table thead th.special-position-header { background: #eaf4fc; color: #24507d; border-right-color: #d8e8f5; border-bottom-color: #b6d4ee; }
 .data-table thead th:hover { background: #dcecfa; }
+.data-table thead th.col-income, .data-table thead th.col-income.calculated-header { background: #e8f5ee; color: #1f6b45; border-bottom-color: #8fcfae; }
+.data-table thead th.col-income:hover { background: #dcf0e5; }
+.data-table thead th.col-deduct, .data-table thead th.col-deduct.calculated-header { background: #fdecec; color: #a3352f; border-bottom-color: #ebaaa6; }
+.data-table thead th.col-deduct:hover { background: #fadcdc; }
 .data-table thead th.selected-header, .data-table thead th.selected-header:hover,
 .data-table thead th.selected-header.col-income, .data-table thead th.selected-header.col-deduct { background: #d6e7fd; color: #164fb5; border-bottom-color: var(--ocean-blue); }
 .data-table thead th .column-resizer::after { background: #9cc0e4; }
@@ -644,3 +660,126 @@ body {
 
 /* Biotime per-employee report: panel height follows the rows (shrinks and scrolls only when taller than the screen). */
 .dataset-page > .data-panel.biotime-report-panel { flex: 0 1 auto; }
+
+/* Sidebar groups: clear headings with dividers, sub-menus indented under a guide line */
+.sidebar .nav-label.nav-label-group {
+  display: flex; align-items: center; gap: 8px;
+  margin: 18px 0 8px; padding: 12px 10px 0;
+  border-top: 1px solid rgba(255, 255, 255, .22);
+  color: #fff; font-size: 12px; font-weight: 700; letter-spacing: .6px;
+}
+.sidebar .nav-label.nav-label-group::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%; background: rgba(255, 255, 255, .85);
+}
+.sidebar .brand-lockup + .nav-label.nav-label-group { border-top: 0; margin-top: 10px; padding-top: 0; }
+.sidebar .nav-label.nav-label-group + .main-nav {
+  margin-left: 13px; padding-left: 8px; border-left: 2px solid rgba(255, 255, 255, .2);
+}
+.sidebar .nav-label.nav-label-group + .main-nav .nav-item { font-size: 13px; font-weight: 400; }
+.sidebar .nav-label.nav-label-group + .main-nav .nav-item.active { font-weight: 600; }
+
+/* Biotime report: orange blinking alert when Admin ลงค่าแรง has a request for that day */
+.bt-wage-alert {
+  display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px;
+  background: #f97316; color: #fff; font-size: 10px; font-weight: 700;
+  animation: bt-wage-blink 1.1s ease-in-out infinite;
+}
+@keyframes bt-wage-blink {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(249, 115, 22, .6); }
+  50% { opacity: .55; box-shadow: 0 0 0 5px rgba(249, 115, 22, 0); }
+}
+
+/* Whole row blinks orange when Admin ลงค่าแรง has a request for that day */
+.data-table tbody tr.bt-wage-row > td { animation: bt-wage-row-blink 1.2s ease-in-out infinite; }
+@keyframes bt-wage-row-blink {
+  0%, 100% { background-color: #fed7aa; }
+  50% { background-color: #fdba74; }
+}
+
+/* Approved requests: static light-green row and chip */
+.data-table tbody tr.bt-wage-row.approved > td { animation: none; background-color: #dcfce7; }
+.bt-wage-alert.approved { background: #16a34a; animation: none; }
+
+/* Room for request details and the employee picker. */
+.editor-modal.profile-modal.wage-add-modal { width: min(1180px, 96vw); max-width: 1180px; }
+.wage-type-checks { flex-wrap: wrap; }
+.wage-time-fields { display: grid; gap: 12px; margin: 12px 0; width: 100%; }
+.wage-time-fields > label { display: grid; gap: 6px; }
+.wage-time-fields textarea { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid var(--line); border-radius: 10px; font: inherit; }
+.wage-time-options { display: flex; flex-wrap: wrap; gap: 24px; }
+.wage-time-options > div { display: flex; align-items: center; gap: 10px; }
+.wage-time-options label { display: flex; align-items: center; gap: 6px; }
+.wage-time-options input[type="time"] { padding: 8px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.wage-time-reason { white-space: normal; overflow-wrap: anywhere; }
+
+.wage-upload-field { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.wage-upload-field.invalid { border-color: #dc2626; background: #fff1f2; }
+.wage-upload-field .wage-upload-error, .wage-upload-required { color: #dc2626; }
+.wage-upload-field input[type="file"] { width: 100%; min-width: 0; }
+.wage-upload-item { display: flex; gap: 12px; align-items: center; overflow-wrap: anywhere; }
+
+.wage-drop-backdrop { z-index: 1500; }
+.editor-modal.wage-drop-modal { width: min(1380px, 96vw); max-width: 1380px; }
+.wage-drop-body { padding: 16px 20px; overflow: auto; min-height: 100px; }
+.wage-drop-body .table-scroll { max-height: 55vh; }
+.wage-drop-table { min-width: 1250px; width: 100%; }
+.wage-drop-table tr.wage-drop-selected td { background: #fff3a6 !important; color: #594300; font-weight: 700; }
+.wage-drop-notice, .wage-period-hint { color: #856000; font-size: 13px; }
+/* Keep the request form and actions visible; only employee rows scroll. */
+.editor-modal.profile-modal.wage-add-modal {
+  display: flex;
+  flex-direction: column;
+  height: min(800px, calc(100dvh - 40px));
+  max-height: calc(100dvh - 40px);
+  overflow: hidden;
+}
+.wage-add-modal > .modal-header,
+.wage-add-modal > .modal-footer { flex: 0 0 auto; padding: 12px 20px; }
+.wage-add-modal > .modal-header h2 { margin: 0; font-size: 20px; }
+.wage-add-modal > .profile-modal-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  gap: 10px;
+  padding: 12px 20px;
+}
+.wage-add-modal .profile-modal-body > :not(.wage-add-table) { flex: 0 0 auto; }
+.wage-add-modal .wage-add-options { gap: 20px; margin: 0; }
+.wage-add-modal .wage-add-label { margin-bottom: 5px; }
+.wage-add-modal .wage-type-checks { gap: 14px; min-height: 34px; }
+.wage-add-modal .wage-type-checks label { display: inline-flex; align-items: center; gap: 6px; }
+.wage-add-modal .wage-period-hint:empty { display: none; }
+.wage-add-modal .wage-time-fields {
+  grid-template-columns: minmax(0, 1.2fr) minmax(210px, .8fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+  margin: 0;
+  font-size: 12px;
+}
+.wage-add-modal .wage-time-fields textarea { height: 64px; min-height: 0; padding: 6px 8px; resize: none; }
+.wage-add-modal .wage-time-options { display: grid; gap: 6px; padding-top: 20px; }
+.wage-add-modal .wage-time-options > div { gap: 8px; }
+.wage-add-modal .wage-time-options label { min-width: 50px; }
+.wage-add-modal .wage-time-options input[type="time"] { padding: 4px 6px; min-width: 0; }
+.wage-add-modal .wage-upload-field { min-width: 0; gap: 5px; padding: 8px 10px; }
+.wage-add-modal .wage-upload-field input { font-size: 11px; }
+.wage-add-modal .wage-upload-item { gap: 6px; font-size: 11px; }
+.wage-add-modal .wage-upload-item a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wage-add-modal .wage-upload-item button { flex-shrink: 0; padding: 0; font-size: 11px; }
+.wage-add-modal .profile-modal-body > input { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; font-size: 12px; }
+.wage-add-modal .wage-add-table { flex: 1 1 0; min-height: 0; margin: 0; }
+.wage-add-modal .add-rows-head { flex: 0 0 auto; }
+.wage-add-modal .add-rows-scroll { flex: 1 1 0; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; }
+.wage-add-modal .wage-entry-error { margin: 0; }
+@media (max-width: 760px) {
+  .wage-add-modal .wage-time-fields { grid-template-columns: minmax(0, 1fr) minmax(180px, 1fr); gap: 8px; }
+  .wage-add-modal .wage-upload-field { grid-column: 1 / -1; grid-template-columns: auto minmax(0, 1fr); align-items: center; }
+  .wage-add-modal .wage-upload-field > small,
+  .wage-add-modal .wage-upload-item { grid-column: 1 / -1; }
+  .wage-add-modal .wage-add-options { gap: 8px 16px; }
+  .wage-add-modal .wage-type-checks { gap: 8px; }
+  .wage-add-modal > .profile-modal-body { padding: 10px 12px; gap: 8px; }
+  .wage-add-modal > .modal-header, .wage-add-modal > .modal-footer { padding: 10px 12px; }
+}

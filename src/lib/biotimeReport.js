@@ -1,23 +1,27 @@
+import { workDaysFromScans } from './biotimeScans';
 // Builds the per-employee attendance report (same layout as the HR Excel sample) from the
 // first/last scan per day saved under the period.
 //
 // Rules derived from the sample report:
 //  - Mon–Sat shift is 07:30–16:30; Sunday is a rest day (00:00–23:59).
-//  - วันปกติ = 1 for a Mon–Sat day with a scan.
-//  - OT1.5, วันอาทิตย์ and วันหยุดบริษัท are in hours. OT1.5 = whole hours worked after the shift end (16:30), e.g. out 17:31 → 1, 19:43 → 3.
+//  - วันปกติ = actual hours within the shift / 9, capped at 1 and floored to one decimal.
+//    Both check-in and check-out are required; time outside the shift is excluded.
+//  - OT1.5, วันอาทิตย์ and วันหยุดบริษัท are in hours. OT1.5 counts completed 30-minute blocks
+//    after the shift end (16:30), e.g. out 17:00 → 0.5, 17:31 → 1, 19:43 → 3.
 //  - วันอาทิตย์ = 9 hours (shift length) for a Sunday with a scan, but only after 6 consecutive
-//    worked days (Mon–Sat all scanned). Otherwise the Sunday is paid as a normal day (วันปกติ = 1,
-//    07:30–16:30, OT after 16:30) and flagged `sundayAsNormal`. Days before the period start
+//    worked days (Mon–Sat all scanned). Otherwise the Sunday is paid as a normal day (prorated,
+//    actual elapsed hours / 9, capped at 1 day) and flagged `sundayAsNormal`. Days before the period start
 //    are covered by `leadInDays` (fetched with the period, or taken from the previous period);
 //    without them, if those are the only gap the Sunday rate stays, flagged `sundayUnverified`.
 //  - วันหยุดบริษัท: a non-Sunday-rate day listed by `holidayFor(date)` (menu วันหยุดบริษัท) with a scan
 //    pays the shift length (9 h by default) in this column instead of วันปกติ, and gets no OT.
 //  - A day with a shift from ตั้งกะการทำงาน (`shiftFor`) uses that shift's start/end instead of the
 //    defaults above, whatever Biotime sends: OT counts from its end and a Sunday pays its length.
-//    Overnight shifts (end ≤ start) get no OT, because scans are grouped per calendar day.
+//    Overnight shifts pair the next morning checkout with the shift start date, including OT.
 //  - A time ticked and typed in by hand (`record.overrides`) is used instead of the Biotime scan,
-//    e.g. scan out 19:00 (OT 2) overridden to 17:00 → OT 0.
+//    e.g. scan out 19:00 (OT 2.5) overridden to 17:00 → OT 0.5.
 import { shiftHours } from './shifts';
+import { lateGraceMinutes } from './attendancePolicy';
 
 export const SHIFT_START = '07:30';
 export const SHIFT_END = '16:30';
@@ -96,10 +100,16 @@ export function attachLeadIn(record, previousRecord) {
 export const previousPeriodOf = (periods, startDate) => (startDate ? periods.find((item) => item.endDate === addDays(startDate, -1)) : undefined);
 
 export function buildEmployeeReport(record, shiftFor = () => null, holidayFor = () => null) {
+  const biotimeSchedule = record?.scheduleSource === 'biotime';
+  if (biotimeSchedule) {
+    const localShiftFor = shiftFor;
+    shiftFor = (id, date) => record.scheduledDays?.[date] ? { ...record.scheduledDays[date], lateGraceMinutes: localShiftFor(id, date)?.lateGraceMinutes } : null;
+  }
   const leadInDays = record?.leadInStartDate ? record.leadInDays || [] : [];
-  const rawByDate = new Map((record?.days || []).map((day) => [day.date, day]));
+  const workDays = workDaysFromScans([...leadInDays, ...(record?.days || []), ...(record?.trailingDays || [])], record?.employeeId, shiftFor);
+  const rawByDate = new Map(workDays.map((day) => [day.date, day]));
   const overrides = record?.overrides || {};
-  const byDate = new Map([...leadInDays, ...applyOverrides(record?.days || [], overrides)].map((day) => [day.date, day]));
+  const byDate = new Map(applyOverrides(workDays, overrides).map((day) => [day.date, day]));
   const knownFrom = record?.leadInStartDate || record?.startDate;
   const dates = record?.startDate && record?.endDate ? datesBetween(record.startDate, record.endDate) : (record?.days || []).map((day) => day.date).sort();
   const totals = { normal: 0, ot: 0, sunday: 0, holiday: 0 };
@@ -110,7 +120,7 @@ export function buildEmployeeReport(record, shiftFor = () => null, holidayFor = 
     const assigned = shiftFor(record?.employeeId, date);
     return {
       date, leadIn: true, weekday: THAI_WEEKDAYS[weekdayIndex], isSunday: weekdayIndex === 0, shiftName: assigned?.name || '',
-      shiftStart: assigned ? assigned.startTime : SHIFT_START, shiftEnd: assigned ? assigned.endTime : SHIFT_END,
+      shiftStart: assigned ? assigned.startTime : biotimeSchedule ? '' : SHIFT_START, shiftEnd: assigned ? assigned.endTime : biotimeSchedule ? '' : SHIFT_END,
       deviceIn: day?.deviceIn || '', deviceOut: day?.deviceOut || '',
       timeIn: day?.checkIn ? day.checkIn.slice(0, 5) : '', timeOut: day?.checkOut ? day.checkOut.slice(0, 5) : '',
       normal: 0, ot: 0, sunday: 0, holiday: 0,
@@ -141,8 +151,9 @@ export function buildEmployeeReport(record, shiftFor = () => null, holidayFor = 
       sundayUnverified,
       holidayName: holiday ? holiday.name || 'วันหยุดบริษัท' : '',
       shiftName: assigned?.name || '',
-      shiftStart: assigned ? assigned.startTime : restDay ? REST_DAY_START : SHIFT_START,
-      shiftEnd: assigned ? assigned.endTime : restDay ? REST_DAY_END : SHIFT_END,
+      lateGraceMinutes: lateGraceMinutes(assigned?.lateGraceMinutes),
+      shiftStart: assigned ? assigned.startTime : biotimeSchedule ? '' : restDay ? REST_DAY_START : SHIFT_START,
+      shiftEnd: assigned ? assigned.endTime : biotimeSchedule ? '' : restDay ? REST_DAY_END : SHIFT_END,
       deviceIn: day?.deviceIn || '',
       deviceOut: day?.deviceOut || '',
       timeIn: day?.checkIn ? day.checkIn.slice(0, 5) : '',
@@ -156,17 +167,40 @@ export function buildEmployeeReport(record, shiftFor = () => null, holidayFor = 
       sunday: 0,
       holiday: 0,
     };
-    if (day?.checkIn) {
+    const clockIn = toMinutes(row.timeIn);
+    const out = toMinutes(row.timeOut);
+    const start = toMinutes(row.shiftStart);
+    const end = toMinutes(row.shiftEnd);
+    const overnight = Boolean(assigned) && end <= start;
+    if (sundayAsNormal && !holiday && clockIn !== null && out !== null) {
+      // A rest day paid as normal uses actual elapsed work, even without a timetable.
+      const clockOut = overnight && out < clockIn ? out + 1440 : out;
+      const workedMinutes = Math.max(0, clockOut - clockIn);
+      row.normal = Math.min(1, Math.floor(workedMinutes * 10 / (WORK_DAY_HOURS * 60)) / 10);
+    } else if (day?.checkIn && (!biotimeSchedule || assigned)) {
       const dayHours = assigned ? shiftHours(assigned.startTime, assigned.endTime) : WORK_DAY_HOURS;
       if (restDay) row.sunday = dayHours;
       else if (holiday) row.holiday = dayHours;
-      else row.normal = 1;
+      else if (clockIn !== null && out !== null && start !== null && end !== null) {
+        // Overnight checkout belongs to the next calendar day.
+        // Credit the scheduled start only inside the project's inclusive grace window.
+        // Keep the actual scan visible and require a checkout after the check-in.
+        const effectiveIn = clockIn >= start && clockIn <= start + row.lateGraceMinutes ? start : clockIn;
+        const clockOut = overnight && out < clockIn ? out + 1440 : out;
+        const workedMinutes = clockOut > clockIn ? Math.max(0, Math.min(clockOut, overnight ? end + 1440 : end) - Math.max(effectiveIn, start)) : 0;
+        row.normal = Math.min(1, Math.floor(workedMinutes * 10 / (WORK_DAY_HOURS * 60)) / 10);
+      }
     }
-    const out = toMinutes(row.timeOut);
-    const end = toMinutes(row.shiftEnd);
-    const overnight = Boolean(assigned) && end <= toMinutes(row.shiftStart);
-    if (!restDay && !holiday && !overnight && out !== null && end !== null) row.ot = Math.max(0, Math.floor((out - end) / 60));
-    totals.normal += row.normal;
+    if (!restDay && !holiday && out !== null && end !== null) {
+      // Compare checkout and scheduled end on the same timeline across midnight.
+      // A lone morning checkout cannot establish an overnight work interval.
+      if (!overnight || clockIn !== null) {
+        const clockOut = overnight && out < clockIn ? out + 1440 : out;
+        const shiftEnd = overnight ? end + 1440 : end;
+        row.ot = Math.max(0, Math.floor((clockOut - shiftEnd) / 30) * 0.5);
+      }
+    }
+    totals.normal = Math.round((totals.normal + row.normal) * 10) / 10;
     totals.ot += row.ot;
     totals.sunday += row.sunday;
     totals.holiday += row.holiday;

@@ -75,7 +75,6 @@ position: string
 normalDays: number
 overtime15: number
 overtime2Sunday: number
-overtime2Holiday: number
 holidayHours: number
 travelFormula: number
 dailyRate: number
@@ -86,7 +85,6 @@ overtimeRate15: number
 regularWage: number
 overtime15Amount: number
 overtime2SundayAmount: number
-overtime2HolidayAmount: number
 holidayHoursAmount: number
 positionPhoneTotal: number
 travelAmount: number
@@ -184,6 +182,8 @@ CMG-Payroll/root
 - Role: `MasterAdmin` (ทุกอย่าง), `PayrollAdmin` (สรุปค่าแรง), `RateAdmin` (อัตราค่าแรง), `WageEntry` (Admin ลงค่าแรง), `Staff` (ภาพรวม) หลาย Role ได้สิทธิ์รวมกัน
 - เมนู อัตราค่าแรง และ สรุปค่าแรง เป็นข้อมูลกลาง ไม่ผ่านโครงการ (เห็นเฉพาะ MasterAdmin) แยกหมวดใน Sidebar
 - ผู้ใช้เห็นเฉพาะโครงการที่ MasterAdmin Assign ให้ โมดูลอนาคตที่ผูกโครงการให้เก็บใต้ `projects/{projectId}`
+
+โครงการเก็บ `lateGraceMinutes` เป็นจำนวนเต็มตั้งแต่ 0 หน่วยนาที โครงการใหม่ทั้งที่เพิ่มเองและดึงจากอัตราค่าแรงมีค่าเริ่มต้น 10 นาที (โครงการเดิมที่ไม่มีฟิลด์นี้ใช้ 0) แก้ไขได้ในเมนูโครงการ โดยการลงเวลาใช้ค่าจากโครงการของกะที่ Assign ให้พนักงานในวันนั้น หากเข้าไม่เกินเวลาเริ่มกะบวกจำนวนนาทีนี้ ให้นับเวลาเริ่มงานตามกะ แต่ยังแสดงเวลาสแกนจริงและต้องมีเวลาออกหลังเวลาเข้า การออกก่อนเลิกกะยังลดวันทำงานตามสูตรเดิม และ OT/วันอาทิตย์/วันหยุดบริษัทใช้กติกาเดิม การแก้ค่านี้มีผลกับรายงานที่คำนวณใหม่จากข้อมูลสแกนที่บันทึกไว้ด้วย
 - ตัวอย่าง Firestore Rules อยู่ที่ `firestore.rules` และต้องเปิด Google + Email/Password ใน Firebase Authentication พร้อมเพิ่มโดเมนใน Authorized domains
 
 ## UI layout rules

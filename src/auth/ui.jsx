@@ -324,7 +324,7 @@ export function UserManagementPage({ users, projects, loaded, onNotify }) {
 // -------------------------------------------------------------- projects -----
 
 function ProjectEditModal({ project, onClose, onSave }) {
-  const [form, setForm] = useState({ name: project?.name || '', code: project?.code || '', description: project?.description || '', status: project?.status === 'Disable' ? 'Disable' : 'Active' });
+  const [form, setForm] = useState({ name: project?.name || '', code: project?.code || '', description: project?.description || '', lateGraceMinutes: project ? (project.lateGraceMinutes ?? 0) : 10, status: project?.status === 'Disable' ? 'Disable' : 'Active' });
   const [saving, setSaving] = useState(false);
   const set = (key) => (event) => setForm((current) => ({ ...current, [key]: event.target.value }));
   const submit = async (event) => {
@@ -332,7 +332,7 @@ function ProjectEditModal({ project, onClose, onSave }) {
     if (saving || !form.name.trim()) return;
     setSaving(true);
     try {
-      await onSave(form);
+      await onSave({ ...form, lateGraceMinutes: Number(form.lateGraceMinutes) });
     } finally {
       setSaving(false);
     }
@@ -344,6 +344,7 @@ function ProjectEditModal({ project, onClose, onSave }) {
         <div className="profile-modal-body"><div className="editor-grid two">
           <label className="full-field"><span>ชื่อโครงการ</span><input required value={form.name} onChange={set('name')} /></label>
           <label><span>รหัสโครงการ</span><input value={form.code} onChange={set('code')} /></label>
+          <label><span>เข้างานสาย (นาที)</span><input type="number" min="0" step="1" required value={form.lateGraceMinutes} onChange={set('lateGraceMinutes')} /><small>สายไม่เกินจำนวนนี้ ให้นับเวลาเริ่มงานตามกะ</small></label>
           <label className="full-field"><span>รายละเอียด</span><input value={form.description} onChange={set('description')} /></label>
           <label><span>สถานะ</span><select value={form.status} onChange={set('status')}>{PROJECT_STATUSES.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
         </div></div>
@@ -420,14 +421,15 @@ export function ProjectsPage({ projects, rateRows = [], onNotify }) {
           <div className="data-panel-toolbar"><div><h2>โครงการ <span className="tab-count">{projects.length}</span></h2></div><div className="toolbar-controls"><div className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ค้นหาโครงการ..." /></div></div></div>
           <div className="table-scroll">
             <table className="data-table">
-              <colgroup><col style={{ width: 150 }} /><col style={{ width: '32%' }} /><col /><col style={{ width: 110 }} />{isMasterAdmin && <col style={{ width: 130 }} />}</colgroup>
-              <thead><tr><th>รหัส</th><th>ชื่อโครงการ</th><th>รายละเอียด</th><th>สถานะ</th>{isMasterAdmin && <th>จัดการ</th>}</tr></thead>
+              <colgroup><col style={{ width: 150 }} /><col style={{ width: '32%' }} /><col /><col style={{ width: 140 }} /><col style={{ width: 110 }} />{isMasterAdmin && <col style={{ width: 130 }} />}</colgroup>
+              <thead><tr><th>รหัส</th><th>ชื่อโครงการ</th><th>รายละเอียด</th><th>เข้างานสาย (นาที)</th><th>สถานะ</th>{isMasterAdmin && <th>จัดการ</th>}</tr></thead>
               <tbody>
                 {shownProjects.map((project) => (
                   <tr key={project.id}>
                     <td>{project.code ? <strong className="employee-code">{project.code}</strong> : <span className="muted">-</span>}</td>
                     <td className="name-cell">{project.name}</td>
                     <td>{project.description || <span className="muted">-</span>}</td>
+                    <td>{project.lateGraceMinutes ?? 0}</td>
                     <td><span className={`status-badge ${project.status === 'Disable' ? 'rejected' : 'approved'}`}>{project.status === 'Disable' ? 'Disable' : 'Active'}</span></td>
                     {isMasterAdmin && <td className="action-cell">
                       <button type="button" className="row-edit-button" onClick={() => setEditing(project)}>แก้ไข</button>{' '}
@@ -435,7 +437,7 @@ export function ProjectsPage({ projects, rateRows = [], onNotify }) {
                     </td>}
                   </tr>
                 ))}
-                {!shownProjects.length && <tr><td colSpan={isMasterAdmin ? 5 : 4} className="muted">ไม่พบโครงการที่ค้นหา</td></tr>}
+                {!shownProjects.length && <tr><td colSpan={isMasterAdmin ? 6 : 5} className="muted">ไม่พบโครงการที่ค้นหา</td></tr>}
               </tbody>
             </table>
           </div>
